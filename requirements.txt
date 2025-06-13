@@ -1,0 +1,7 @@
+# requirements.txt example
+adafruit_display_text
+adafruit_imageload
+adafruit_ntp
+adafruit_sdcard
+adafruit_requests
+adafruit_httpserver
