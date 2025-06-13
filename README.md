@@ -1,5 +1,5 @@
-# StageTWO Bootloader 
-with One-Button Menu, Recovery & File Manager System
+# StageTWO Bootloader    (For CircuitPython Firmware)
+--with One-Button Menu, Recovery & File Manager & System Tools
 
 This project provides a robust, display-based, one-button interface for managing, recovering, and maintaining CircuitPython devices. It is designed for devices with a display and a single button, and supports both graphical and serial/console operation. It will also serve as the front-end for my custom circuitpython build based around a specific use case of hardware hacking, modifying and reverse engineering (think esp32 maruader, the flipper zero etc, but less RF and more Hardware). This Project is just the user front end installable on a prebuilt circuit python board , of course pending dependancies. 
 
