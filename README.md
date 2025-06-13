@@ -20,53 +20,53 @@ Sidenotes:
     hardware debugging and interface device. Think USB-Serial probes, UART interfaces, serial port monitors, hardware testing etc. This is where
     my inspiration takes off.
 
-    Sick of having to do every design change or creative direction destructively and rewritting  some files so many times in the process i decided
-    to come up with STAGE-TWO.
+    Sick of having manually launch files via repl and tethered to PC, or editing boot.py and code.py files so many times in the process i decided
+    to come up with STAGE-TWO, auto repairing, customizable, functional bootloader menu system with app loader, filemanager, and many more handy system tools. 
 
-    🔐 Security
-TOTP Authentication with QR code setup
-JWT-like token system for session management
-Secure API endpoints with authentication middleware
+🔐 Security
+ TOTP Authentication with QR code setup
+ JWT-like token system for session management
+ Secure API endpoints with authentication middleware
 📱 Modern Web Interface
-Responsive design that works on desktop and mobile
-Tabbed interface for organized functionality
-Real-time status updates and live feedback
-Professional styling with smooth animations
+ Responsive design that works on desktop and mobile
+ Tabbed interface for organized functionality
+ Real-time status updates and live feedback
+ Professional styling with smooth animations
 🐍 Advanced Code Execution
-Live Python code editor with syntax highlighting
-Real-time execution without device restart
-Comprehensive error handling with traceback
-Code templates for common tasks
+ Live Python code editor with syntax highlighting
+ Real-time execution without device restart
+ Comprehensive error handling with traceback
+ Code templates for common tasks
 📁 Complete File Management
-Full file browser with create/edit/delete operations
-Directory navigation and folder creation
-File editor with syntax highlighting
-Drag-and-drop file operations
+ Full file browser with create/edit/delete operations
+ Directory navigation and folder creation
+ File editor with syntax highlighting
+ Drag-and-drop file operations
 🖥️ Display Mirroring
-Real-time display capture and visualization
-Element detection and rendering
-Auto-refresh capabilities
-Canvas-based display simulation
+ Real-time display capture and visualization
+ Element detection and rendering
+ Auto-refresh capabilities
+ Canvas-based display simulation
 🔘 Virtual Button Control
-Touch-responsive virtual button
-Multiple press types (quick click, long press)
-Visual feedback and state indication
-Physical button integration
+ Touch-responsive virtual button
+ Multiple press types (quick click, long press)
+ Visual feedback and state indication
+ Physical button integration
 📱 Application Management
-App discovery and categorization
-One-click app execution
-App metadata and descriptions
-Integration with file manager
+ App discovery and categorization
+ One-click app execution
+ App metadata and descriptions
+ Integration with file manager
 ⚙️ System Control
-Interactive console with command history
-Memory management and garbage collection
-System diagnostics and health monitoring
-Device reset and configuration
-🛠️ Development Tools
-Test file generation for common scenarios
-System diagnostics and health checks
-Performance monitoring and optimization
-Debug utilities and logging
+ Interactive console with command history
+ Memory management and garbage collection
+ System diagnostics and health monitoring**  -- COMING IN NEXT UPDATE --
+ Device reset and configuration
+🛠️ Development Tools**   -- COMING IN NEXT UPDATE --
+ Test file generation for common scenarios
+ System diagnostics and health checks
+ Performance monitoring and optimization
+ Debug utilities and logging
 
 
 
