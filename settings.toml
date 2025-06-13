@@ -1,0 +1,7 @@
+# WiFi Configuration
+CIRCUITPY_WIFI_SSID = "Access 316"
+CIRCUITPY_WIFI_PASSWORD = "ZaiyEden2024!"
+
+
+
+

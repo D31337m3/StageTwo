@@ -1,59 +1,18 @@
-import microcontroller
-import storage
-import usb_cdc
-import usb_hid
-import supervisor
-import time
 import board
-import rtc
 import displayio
-import adafruit_ntp
-import adafruit_sdcard
-import adafruit_imageload
-import socketpool
-import os
-import wifi
-import busio
-import digitalio
-import gc
 import terminalio
 from adafruit_display_text import label
-
-# NVM flag positions
-RECOVERY_FLAG_ADDR = 0
-DEVELOPER_MODE_FLAG_ADDR = 1
-FLASH_WRITE_FLAG_ADDR = 2
-RELOAD_COUNTER_ADDR = 3
-RESET_TYPE_ADDR = 4
-BOOT_LOOP_THRESHOLD_ADDR = 5
-LAST_SUCCESSFUL_BOOT_ADDR = 6
-USB_HOST_ADDR = 7
-FIRST_BOOT_SETUP_FLAG_ADDR = 8
-
-# Reset type constants
-RESET_POWER_ON = 1
-RESET_BROWNOUT = 2
-RESET_SOFTWARE = 3
-RESET_WATCHDOG = 4
-RESET_UNKNOWN = 5
-
-# SD Card Constants
-SCK = board.SD_SCK
-MOSI = board.SD_MOSI
-MISO = board.SD_MISO
-SPI = busio.SPI(SCK, MOSI, MISO)
-CS = digitalio.DigitalInOut(board.SD_CS)
-
-DEFAULT_BOOT_LOOP_THRESHOLD = 3
-SUCCESSFUL_BOOT_DELAY = 5
+import digitalio
+import supervisor
+import time
+import microcontroller
+import os
 
 SETTINGS_PATH = "/settings.toml"
 DEFAULT_BOOT_FILE = "app_loader.py"
 DEFAULT_TIMEOUT = 3
 
-BOOT_FILES = ["app_loader.py", "main.py", "code.py", "user_app.py"]
-
-# --- Settings helpers ---
+# Helper functions for settings.toml
 def read_settings():
     settings = {
         "DEFAULT_BOOT_FILE": DEFAULT_BOOT_FILE,
@@ -61,8 +20,7 @@ def read_settings():
         "DEVELOPER_MODE": False,
         "FLASH_WRITE": False,
     }
-    try:
-        os.stat(SETTINGS_PATH)
+    if os.path.exists(SETTINGS_PATH):
         with open(SETTINGS_PATH, "r") as f:
             for line in f:
                 if line.startswith("DEFAULT_BOOT_FILE"):
@@ -76,14 +34,11 @@ def read_settings():
                     settings["DEVELOPER_MODE"] = "True" in line or "1" in line
                 elif line.startswith("FLASH_WRITE"):
                     settings["FLASH_WRITE"] = "True" in line or "1" in line
-    except OSError:
-        pass
     return settings
 
 def save_settings(settings):
     lines = []
-    try:
-        os.stat(SETTINGS_PATH)
+    if os.path.exists(SETTINGS_PATH):
         with open(SETTINGS_PATH, "r") as f:
             for line in f:
                 if line.startswith("DEFAULT_BOOT_FILE"):
@@ -95,8 +50,6 @@ def save_settings(settings):
                 elif line.startswith("FLASH_WRITE"):
                     continue
                 lines.append(line)
-    except OSError:
-        pass
     lines.append(f'DEFAULT_BOOT_FILE = "{settings["DEFAULT_BOOT_FILE"]}"\n')
     lines.append(f'BOOT_TIMEOUT = {settings["BOOT_TIMEOUT"]}\n')
     lines.append(f'DEVELOPER_MODE = {int(settings["DEVELOPER_MODE"])}\n')
@@ -106,181 +59,6 @@ def save_settings(settings):
 
 settings = read_settings()
 
-# --- NVM helpers ---
-def set_nvm_flag(address, value):
-    microcontroller.nvm[address] = 1 if value else 0
-
-def read_nvm_flag(address):
-    try:
-        return microcontroller.nvm[address] == 1
-    except IndexError:
-        return False
-
-def read_nvm_byte(address):
-    try:
-        return microcontroller.nvm[address]
-    except IndexError:
-        return 0
-
-def write_nvm_byte(address, value):
-    try:
-        microcontroller.nvm[address] = min(255, max(0, value))
-    except IndexError:
-        pass
-
-def sync_nvm_flags_from_settings():
-    dev_mode = settings["DEVELOPER_MODE"]
-    flash_write = settings["FLASH_WRITE"]
-    set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, dev_mode)
-    set_nvm_flag(FLASH_WRITE_FLAG_ADDR, flash_write)
-
-# --- Boot logic ---
-def configure_usb_and_storage(developer_mode, flash_write_enabled):
-    usb_cdc.enable(console=True, data=False)
-    if developer_mode:
-        print("Developer Mode")
-        usb_hid.enable()
-    else:
-        print("User mode")
-        usb_hid.disable()
-    if flash_write_enabled:
-        print("Flash R/W, USB drive hidden")
-        storage.remount("/", readonly=False)
-        storage.disable_usb_drive()
-    else:
-        print("Flash R/O, USB drive hidden")
-        storage.remount("/", readonly=True)
-        storage.disable_usb_drive()
-
-def prepare_sdcard():
-    try:
-        sdcard = adafruit_sdcard.SDCard(SPI, CS)
-        vfs = storage.VfsFat(sdcard)
-        storage.mount(vfs, '/sd')
-        os.listdir('/sd')
-    except Exception as e:
-        print(f"   - SDCARD Fail:{e}")
-        time.sleep(3)
-
-def set_time_if_wifi():
-    wifi_ssid = os.getenv("CIRCUITPY_WIFI_SSID")
-    wifi_password = os.getenv("CIRCUITPY_WIFI_PASSWORD")
-    if wifi_ssid is None:
-        print("First Run , WiFi credentials missing n\\  --->settings.toml")
-        raise ValueError("SSID not found")
-    try:
-        wifi.radio.connect(wifi_ssid, wifi_password)
-    except ConnectionError:
-        print("WiFi-Fail - Bad Password ")
-        raise
-    pool = socketpool.SocketPool(wifi.radio)
-    ntp = adafruit_ntp.NTP(pool, tz_offset=0, cache_seconds=3600)
-    rtc.RTC().datetime = ntp.datetime
-
-def show_splash():
-    display = board.DISPLAY
-    image, palette = adafruit_imageload.load(
-        "stagetwo_boot.bmp", bitmap=displayio.Bitmap, palette=displayio.Palette
-    )
-    tile_grid = displayio.TileGrid(image, pixel_shader=palette)
-    group = displayio.Group()
-    group.append(tile_grid)
-    board.DISPLAY.root_group = group
-    time.sleep(2)
-    display.root_group = None
-
-def run_first_boot_setup():
-    if not read_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR):
-        return
-    print("=== Welcome to First Boot Setup ===")
-    set_nvm_flag(FLASH_WRITE_FLAG_ADDR, True)
-    display = board.DISPLAY
-    try:
-        image, palette = adafruit_imageload.load(
-            "welcome.bmp", bitmap=displayio.Bitmap, palette=displayio.Palette
-        )
-        tile_grid = displayio.TileGrid(image, pixel_shader=palette)
-        group = displayio.Group()
-        group.append(tile_grid)
-        display.root_group = group
-        time.sleep(2)
-        display.root_group = None
-    except Exception:
-        print("No welcome image, using text mode.")
-    print("Press the button to continue setup...")
-    button = digitalio.DigitalInOut(board.BUTTON)
-    button.switch_to_input(pull=digitalio.Pull.UP)
-    while button.value:
-        time.sleep(0.1)
-    required_dirs = ["apps", "user", "config", "data", "logs"]
-    for d in required_dirs:
-        dir_path = f"/sd/{d}"
-        try:
-            os.mkdir(dir_path)
-            print(f"Created: {dir_path}")
-        except OSError:
-            print(f"Exists: {dir_path}")
-    print("Directories ready. Press button to continue to WiFi setup.")
-    while button.value:
-        time.sleep(0.1)
-    try:
-        exec(open("wifi_config.py").read())
-    except Exception as e:
-        print(f"WiFi config failed: {e}")
-    print("Press button to continue to timezone setup.")
-    while button.value:
-        time.sleep(0.1)
-    try:
-        exec(open("timezone_setup.py").read())
-    except Exception as e:
-        print(f"Timezone setup failed: {e}")
-    print("Setup complete! Clearing setup flag and rebooting...")
-    set_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR, False)
-    time.sleep(2)
-    microcontroller.reset()
-
-def very_early_boot_ops():
-    supervisor.runtime.autoreload = False
-    gc.enable()
-    try:
-        import usb_midi
-        usb_midi.disable()
-    except Exception:
-        print("   -USB_MIDI mode FAILED TO DISABLE")
-    try:
-        if read_nvm_flag(USB_HOST_ADDR) == 1:
-            try:
-                import usb_host
-                usb_host.enable()
-                print("   -USB_HOST mode Enabled by NVM Flag")
-            except Exception:
-                print("   -USB-HOST mode Enabled bt NVM Flag BUT FAILED")
-        else:
-            try:
-                import usb_host
-                usb_host.disable()
-            except Exception:
-                pass
-    except Exception:
-        print("    *  SOME USB configuration failed.")
-    try:
-        set_time_if_wifi()
-    except Exception as e:
-        print(f"Skipping time sync: {e}")
-    try:
-        prepare_sdcard()
-    except Exception as e:
-        print(f"Skipping SD card: {e}")
-    try:
-        sync_nvm_flags_from_settings()
-    except Exception as e:
-        print(f"Skipping NVM sync: {e}")
-    try:
-        run_first_boot_setup()
-    except Exception as e:
-        print(f"Skipping first boot setup: {e}")
-
-# --- Boot menu logic ---
 MENU_ITEMS = [
     ("Boot Normal", "boot"),
     ("Recovery Mode", "recovery.py"),
@@ -288,6 +66,8 @@ MENU_ITEMS = [
     ("Factory Reset", "factory.py"),
     ("Backup System Files", "backup"),
 ]
+
+BOOT_FILES = ["app_loader.py", "main.py", "code.py", "user_app.py"]
 
 display = board.DISPLAY
 group = displayio.Group()
@@ -370,17 +150,21 @@ def settings_menu():
                     if time.monotonic() - press_time > 1.0:
                         # Long press: select
                         if idx == 0:
+                            # Boot file select
                             bf_idx = BOOT_FILES.index(settings["DEFAULT_BOOT_FILE"]) if settings["DEFAULT_BOOT_FILE"] in BOOT_FILES else 0
                             bf_idx = (bf_idx + 1) % len(BOOT_FILES)
                             settings["DEFAULT_BOOT_FILE"] = BOOT_FILES[bf_idx]
                             options[0] = f"Boot File: {settings['DEFAULT_BOOT_FILE']}"
                         elif idx == 1:
+                            # Timeout adjust
                             settings["BOOT_TIMEOUT"] = (settings["BOOT_TIMEOUT"] + 1) % 11 or 1
                             options[1] = f"Timeout: {settings['BOOT_TIMEOUT']}s"
                         elif idx == 2:
+                            # Toggle developer mode
                             settings["DEVELOPER_MODE"] = not settings["DEVELOPER_MODE"]
                             options[2] = f"Developer Mode: {'ON' if settings['DEVELOPER_MODE'] else 'OFF'}"
                         elif idx == 3:
+                            # Toggle flash write
                             settings["FLASH_WRITE"] = not settings["FLASH_WRITE"]
                             options[3] = f"Flash Write: {'ON' if settings['FLASH_WRITE'] else 'OFF'}"
                         elif idx == 4:
@@ -390,6 +174,7 @@ def settings_menu():
                         break
                     time.sleep(0.01)
                 else:
+                    # Short press: next option
                     idx = (idx + 1) % len(options)
                     break
             last_button = button.value
@@ -404,11 +189,13 @@ def run_action(index):
         settings_menu()
         draw_menu(selected)
     elif action == "factory.py":
+        # Set first boot setup flag before rebooting
         FIRST_BOOT_SETUP_FLAG_ADDR = 8
         microcontroller.nvm[FIRST_BOOT_SETUP_FLAG_ADDR] = 1
         supervisor.set_next_code_file(action)
         supervisor.reload()
     elif action == "backup":
+        # Import and call backup from recovery.py
         try:
             import recovery
             rec = recovery.RecoverySystem()
@@ -416,6 +203,7 @@ def run_action(index):
             msg = "Backup complete!" if result else "Backup failed!"
         except Exception as e:
             msg = f"Backup error: {e}"
+        # Show result on display
         if len(group) > 0:
             group.pop()
         msg_group = displayio.Group()
@@ -440,6 +228,7 @@ def menu_loop():
 
     while True:
         input_received = False
+        # Console control
         if supervisor.runtime.serial_bytes_available:
             cmd = input().strip().lower()
             input_received = True
@@ -453,6 +242,7 @@ def menu_loop():
                 selected = int(cmd)
             else:
                 print("Commands: up/down/select or 0-3")
+        # Button navigation
         if not button.value and last_button:
             button_press_time = time.monotonic()
             long_press_handled = False
@@ -480,53 +270,6 @@ def menu_loop():
 
         time.sleep(0.02)
 
-# --- Main execution flow ---
-def main():
-    reset_type = read_nvm_byte(RESET_TYPE_ADDR)
-    reload_count = read_nvm_byte(RELOAD_COUNTER_ADDR)
-    write_nvm_byte(RELOAD_COUNTER_ADDR, (reload_count + 1) % 256)
-    if reload_count >= DEFAULT_BOOT_LOOP_THRESHOLD:
-        set_nvm_flag(RECOVERY_FLAG_ADDR, True)
-        print("!!! BOOT LOOP DETECTED !!!")
-        print("Recovery mode enabled")
-        print("Waiting 5sec. before recovery...")
-        time.sleep(5)
-    if read_nvm_flag(RECOVERY_FLAG_ADDR):
-        print("Recovery flag detected - entering recovery mode")
-        write_nvm_byte(RELOAD_COUNTER_ADDR, 0)
-        try:
-            storage.remount("/", readonly=False)
-        except Exception as e:
-            print(f"Failed to enable flash write access: {e}")
-        try:
-            import recovery
-            recovery.main()
-        except ImportError:
-            print("ERROR: recovery.py not found!")
-            try:
-                exec(open("recovery.py").read())
-            except OSError:
-                print("Creating emergency recovery mode...")
-        except Exception as e:
-            print(f"Recovery system error: {e}")
-        #return  # <--- Prevents continuing to menu if in recovery
-    show_splash()
-    # Clear splash, then re-assign display group for menu
-    display.root_group = None
-    time.sleep(1)
-    display.root_group = group
-    
-    try:
-        very_early_boot_ops()
-    except Exception as e:
-        print(f"Boot ops error: {e}")
-    developer_mode = read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)
-    flash_write_enabled = read_nvm_flag(FLASH_WRITE_FLAG_ADDR)
-    configure_usb_and_storage(developer_mode, flash_write_enabled)
-    print(f"Dev mode: {developer_mode}, R/W: {flash_write_enabled}")
-    print(f"Boot OK {SUCCESSFUL_BOOT_DELAY} seconds")
-    print("Boot Menu: Use button or console (up/down/select/0-3)")
-    menu_loop()
-
-if __name__ == "__main__":
-    main()
+draw_menu(selected)
+print("Boot Menu: Use button or console (up/down/select/0-3)")
+menu_loop()
