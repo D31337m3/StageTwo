@@ -269,7 +269,7 @@ class RecoverySystem:
                     y=list_start_y + (i - start_idx) * 15
                 )
                 menu_group.append(item_label)
-        
+        '''              Doesnt fit on display, need fixing - removed from service for now -D.Ranger
         # Help text
         help_label = label.Label(
             terminalio.FONT,
@@ -279,7 +279,7 @@ class RecoverySystem:
             y=SCREEN_HEIGHT - 35
         )
         menu_group.append(help_label)
-        
+        '''
         # Position indicator
         pos_text = f"{self.selected+1}/{len(self.recovery_menu_items)}"
         pos_label = label.Label(
@@ -310,6 +310,7 @@ class RecoverySystem:
         menu_group.append(status_indicator)
         
         self.main_group.append(menu_group)
+        time.sleep(0.5)
     
     def show_item_details(self, index):
         """Show detailed information about a menu item"""
@@ -1041,12 +1042,16 @@ DEVELOPER_MODE = false
     def _handle_button_input(self):
         """Handle button input and return press duration"""
         if not self.has_button:
-            time.sleep(0.1)
+            time.sleep(0.1)  # Prevent busy loop
             return 0
         
-        # Wait for button press
+        # Wait for button press with timeout to prevent busy loop
+        timeout_count = 0
         while self.button.value:
             time.sleep(0.01)
+            timeout_count += 1
+            if timeout_count > 100:  # 1 second timeout
+                return 0  # No button press
         
         # Measure press duration
         press_start = time.monotonic()
@@ -1054,6 +1059,7 @@ DEVELOPER_MODE = false
             time.sleep(0.01)
         
         return time.monotonic() - press_start
+
     
     def _wait_for_button_action(self):
         """Wait for button press and return action type"""
@@ -1071,27 +1077,51 @@ DEVELOPER_MODE = false
             return "short"
         else:
             return "none"
-    
+        
+        
     def main_loop(self):
         """Main recovery system loop"""
         self.status_bar.set_status("Recovery ready")
         self.log_message("Recovery system started")
         
+        # Add variables to control redraw
+        last_selected = -1
+        last_status_update = time.monotonic()
+        needs_redraw = True
+        
         while True:
             try:
                 if self.current_mode == "main_menu":
-                    self.draw_main_menu()
+                    # Only redraw if something changed
+                    if needs_redraw or self.selected != last_selected:
+                        self.draw_main_menu()
+                        last_selected = self.selected
+                        needs_redraw = False
                     
-                    press_duration = self._handle_button_input()
+                    # Update status bar periodically (every 5 seconds)
+                    if time.monotonic() - last_status_update > 5:
+                        self.status_bar.update_all()
+                        last_status_update = time.monotonic()
+                        needs_redraw = True
                     
-                    if press_duration > 2.0:  # Hold - show details
-                        self.show_item_details(self.selected)
+                    # Handle button input with timeout
+                    if self.has_button:
+                        press_duration = self._handle_button_input()
                         
-                    elif press_duration > 1.0:  # Long press - execute action
-                        self.run_action(self.selected)
-                        
-                    elif press_duration > 0.05:  # Short press - navigate
-                        self.selected = (self.selected + 1) % len(self.recovery_menu_items)
+                        if press_duration > 2.0:  # Hold - show details
+                            self.show_item_details(self.selected)
+                            needs_redraw = True
+                            
+                        elif press_duration > 1.0:  # Long press - execute action
+                            self.run_action(self.selected)
+                            needs_redraw = True
+                            
+                        elif press_duration > 0.05:  # Short press - navigate
+                            self.selected = (self.selected + 1) % len(self.recovery_menu_items)
+                            # needs_redraw will be set by the selection change check above
+                    else:
+                        # Console mode - add delay to prevent busy loop
+                        time.sleep(0.1)
                 
                 else:
                     # Handle other modes if needed
@@ -1107,6 +1137,8 @@ DEVELOPER_MODE = false
                 self._wait_for_button_action()
                 self.current_mode = "main_menu"
                 self.selected = 0
+                needs_redraw = True
+
 
 def main():
     """Main entry point for recovery system"""

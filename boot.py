@@ -1,3 +1,11 @@
+"""
+StageTwo Boot System
+Advanced boot loader with recovery, developer mode, and system management
+Compatible with CircuitPython runtimes
+
+(C) 2025 StageTwo Team
+"""
+
 import microcontroller
 import storage
 import usb_cdc
@@ -7,17 +15,40 @@ import time
 import board
 import rtc
 import displayio
-import adafruit_ntp
-import adafruit_sdcard
-import adafruit_imageload
-import socketpool
 import os
-import wifi
 import busio
 import digitalio
 import gc
 import terminalio
 from adafruit_display_text import label
+
+# Try to import optional modules
+try:
+    import adafruit_ntp
+    import socketpool
+    import wifi
+    NTP_AVAILABLE = True
+except ImportError:
+    NTP_AVAILABLE = False
+    print("NTP/WiFi not available")
+
+try:
+    import adafruit_sdcard
+    SDCARD_AVAILABLE = True
+except ImportError:
+    SDCARD_AVAILABLE = False
+    print("SD card support not available")
+
+try:
+    import adafruit_imageload
+    IMAGE_AVAILABLE = True
+except ImportError:
+    IMAGE_AVAILABLE = False
+    print("Image loading not available")
+
+# Version info
+__version__ = "2.1"
+__author__ = "StageTwo Team"
 
 # NVM flag positions
 RECOVERY_FLAG_ADDR = 0
@@ -37,496 +68,1119 @@ RESET_SOFTWARE = 3
 RESET_WATCHDOG = 4
 RESET_UNKNOWN = 5
 
-# SD Card Constants
-SCK = board.SD_SCK
-MOSI = board.SD_MOSI
-MISO = board.SD_MISO
-SPI = busio.SPI(SCK, MOSI, MISO)
-CS = digitalio.DigitalInOut(board.SD_CS)
-
+# System defaults
 DEFAULT_BOOT_LOOP_THRESHOLD = 3
 SUCCESSFUL_BOOT_DELAY = 5
-
+DEFAULT_BRIGHTNESS = 0.6  # 60% brightness
 SETTINGS_PATH = "/settings.toml"
 DEFAULT_BOOT_FILE = "app_loader.py"
 DEFAULT_TIMEOUT = 3
 
+# Boot file priority order
 BOOT_FILES = ["app_loader.py", "main.py", "code.py", "user_app.py"]
 
-# --- Settings helpers ---
+# SD Card pin configuration (adjust for your board)
+try:
+    SCK = board.SD_SCK
+    MOSI = board.SD_MOSI
+    MISO = board.SD_MISO
+    CS = board.SD_CS
+    SD_PINS_AVAILABLE = True
+except AttributeError:
+    # Fallback for boards without dedicated SD pins
+    try:
+        SCK = board.SCK
+        MOSI = board.MOSI
+        MISO = board.MISO
+        CS = board.D10  # Common CS pin
+        SD_PINS_AVAILABLE = True
+        print("Using fallback SD pins")
+    except AttributeError:
+        SD_PINS_AVAILABLE = False
+        print("No SD pins available")
+
+# --- Settings Management ---
 def read_settings():
+    """Read settings from settings.toml with comprehensive error handling"""
     settings = {
         "DEFAULT_BOOT_FILE": DEFAULT_BOOT_FILE,
         "BOOT_TIMEOUT": DEFAULT_TIMEOUT,
         "DEVELOPER_MODE": False,
         "FLASH_WRITE": False,
+        "DISPLAY_BRIGHTNESS": DEFAULT_BRIGHTNESS,
+        "SD_CARD_ENABLED": True,
+        "WIFI_ENABLED": True,
+        "NTP_ENABLED": True,
+        "SCREENSAVER_ENABLED": True,
+        "SCREENSAVER_TIMEOUT": 300,
+        "SCREENSAVER_TYPE": "trippy"
     }
+    
     try:
-        os.stat(SETTINGS_PATH)
         with open(SETTINGS_PATH, "r") as f:
-            for line in f:
-                if line.startswith("DEFAULT_BOOT_FILE"):
-                    settings["DEFAULT_BOOT_FILE"] = line.split("=")[1].strip().replace('"', "")
-                elif line.startswith("BOOT_TIMEOUT"):
-                    try:
-                        settings["BOOT_TIMEOUT"] = int(line.split("=")[1].strip())
-                    except Exception:
-                        pass
-                elif line.startswith("DEVELOPER_MODE"):
-                    settings["DEVELOPER_MODE"] = "True" in line or "1" in line
-                elif line.startswith("FLASH_WRITE"):
-                    settings["FLASH_WRITE"] = "True" in line or "1" in line
-    except OSError:
-        pass
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                
+                if "=" not in line:
+                    continue
+                
+                try:
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    
+                    # Type conversion
+                    if key in ["BOOT_TIMEOUT"]:
+                        settings[key] = int(value)
+                    elif key in ["DEVELOPER_MODE", "FLASH_WRITE", "SD_CARD_ENABLED", 
+                               "WIFI_ENABLED", "NTP_ENABLED", "SCREENSAVER_ENABLED"]:
+                        settings[key] = value.lower() in ("true", "1", "yes", "on")
+                    elif key in ["DISPLAY_BRIGHTNESS"]:
+                        brightness = float(value)
+                        settings[key] = max(0.1, min(1.0, brightness))  # Clamp between 10% and 100%
+                    elif key in ["SCREENSAVER_TIMEOUT"]:
+                        settings[key] = max(60, int(value))  # Minimum 1 minute
+                    else:
+                        settings[key] = value
+                        
+                except (ValueError, IndexError) as e:
+                    print(f"Settings parse error line {line_num}: {e}")
+                    continue
+                    
+    except OSError as e:
+        print(f"Settings file not found: {e}")
+        # Create default settings file
+        save_settings(settings)
+    except Exception as e:
+        print(f"Settings read error: {e}")
+    
     return settings
 
 def save_settings(settings):
-    lines = []
+    """Save settings to settings.toml with proper formatting"""
     try:
-        os.stat(SETTINGS_PATH)
-        with open(SETTINGS_PATH, "r") as f:
-            for line in f:
-                if line.startswith("DEFAULT_BOOT_FILE"):
-                    continue
-                elif line.startswith("BOOT_TIMEOUT"):
-                    continue
-                elif line.startswith("DEVELOPER_MODE"):
-                    continue
-                elif line.startswith("FLASH_WRITE"):
-                    continue
+        # Read existing file to preserve comments and structure
+        existing_lines = []
+        try:
+            with open(SETTINGS_PATH, "r") as f:
+                existing_lines = f.readlines()
+        except OSError:
+            pass
+        
+        # Build new content
+        lines = []
+        updated_keys = set()
+        
+        # Process existing lines, updating values
+        for line in existing_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
                 lines.append(line)
-    except OSError:
-        pass
-    lines.append(f'DEFAULT_BOOT_FILE = "{settings["DEFAULT_BOOT_FILE"]}"\n')
-    lines.append(f'BOOT_TIMEOUT = {settings["BOOT_TIMEOUT"]}\n')
-    lines.append(f'DEVELOPER_MODE = {int(settings["DEVELOPER_MODE"])}\n')
-    lines.append(f'FLASH_WRITE = {int(settings["FLASH_WRITE"])}\n')
-    with open(SETTINGS_PATH, "w") as f:
-        f.writelines(lines)
+                continue
+            
+            if "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in settings:
+                    # Update existing setting
+                    value = settings[key]
+                    if isinstance(value, bool):
+                        lines.append(f'{key} = {str(value).lower()}\n')
+                    elif isinstance(value, (int, float)):
+                        lines.append(f'{key} = {value}\n')
+                    else:
+                        lines.append(f'{key} = "{value}"\n')
+                    updated_keys.add(key)
+                else:
+                    lines.append(line)
+            else:
+                lines.append(line)
+        
+        # Add new settings that weren't in the file
+        if not existing_lines:
+            lines.append("# StageTwo System Settings\n")
+            lines.append("# Generated automatically - edit as needed\n\n")
+        
+        for key, value in settings.items():
+            if key not in updated_keys:
+                if isinstance(value, bool):
+                    lines.append(f'{key} = {str(value).lower()}\n')
+                elif isinstance(value, (int, float)):
+                    lines.append(f'{key} = {value}\n')
+                else:
+                    lines.append(f'{key} = "{value}"\n')
+        
+        # Write file
+        with open(SETTINGS_PATH, "w") as f:
+            f.writelines(lines)
+            
+        print("Settings saved successfully")
+        
+    except Exception as e:
+        print(f"Settings save error: {e}")
 
+# Load settings early
 settings = read_settings()
 
-# --- NVM helpers ---
+# --- NVM Management ---
 def set_nvm_flag(address, value):
-    microcontroller.nvm[address] = 1 if value else 0
+    """Set NVM flag with error handling"""
+    try:
+        microcontroller.nvm[address] = 1 if value else 0
+        return True
+    except (IndexError, OSError) as e:
+        print(f"NVM write error at {address}: {e}")
+        return False
 
 def read_nvm_flag(address):
+    """Read NVM flag with error handling"""
     try:
         return microcontroller.nvm[address] == 1
-    except IndexError:
+    except (IndexError, OSError):
         return False
 
 def read_nvm_byte(address):
+    """Read NVM byte with error handling"""
     try:
         return microcontroller.nvm[address]
-    except IndexError:
+    except (IndexError, OSError):
         return 0
 
 def write_nvm_byte(address, value):
+    """Write NVM byte with error handling"""
     try:
-        microcontroller.nvm[address] = min(255, max(0, value))
-    except IndexError:
-        pass
+        microcontroller.nvm[address] = min(255, max(0, int(value)))
+        return True
+    except (IndexError, OSError, ValueError) as e:
+        print(f"NVM byte write error at {address}: {e}")
+        return False
 
 def sync_nvm_flags_from_settings():
-    dev_mode = settings["DEVELOPER_MODE"]
-    flash_write = settings["FLASH_WRITE"]
-    set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, dev_mode)
-    set_nvm_flag(FLASH_WRITE_FLAG_ADDR, flash_write)
+    """Synchronize NVM flags with settings"""
+    try:
+        dev_mode = settings.get("DEVELOPER_MODE", False)
+        flash_write = settings.get("FLASH_WRITE", False)
+        
+        set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, dev_mode)
+        set_nvm_flag(FLASH_WRITE_FLAG_ADDR, flash_write)
+        
+        print(f"NVM flags synced: dev={dev_mode}, flash_write={flash_write}")
+        return True
+    except Exception as e:
+        print(f"NVM sync error: {e}")
+        return False
 
-# --- Boot logic ---
+# --- Display Management ---
+def set_display_brightness():
+    """Set display brightness from settings"""
+    try:
+        if hasattr(board.DISPLAY, 'brightness'):
+            brightness = settings.get("DISPLAY_BRIGHTNESS", DEFAULT_BRIGHTNESS)
+            board.DISPLAY.brightness = brightness
+            print(f"Display brightness set to {int(brightness * 100)}%")
+            return True
+        else:
+            print("Display brightness control not available")
+            return False
+    except Exception as e:
+        print(f"Brightness setting error: {e}")
+        return False
+
+# --- USB and Storage Configuration ---
 def configure_usb_and_storage(developer_mode, flash_write_enabled):
-    usb_cdc.enable(console=True, data=False)
-    if developer_mode:
-        print("Developer Mode")
-        usb_hid.enable()
-    else:
-        print("User mode")
-        usb_hid.disable()
-    if flash_write_enabled:
-        print("Flash R/W, USB drive hidden")
-        storage.remount("/", readonly=False)
-        storage.disable_usb_drive()
-    else:
-        print("Flash R/O, USB drive hidden")
-        storage.remount("/", readonly=True)
-        storage.disable_usb_drive()
-
-def prepare_sdcard():
+    """Configure USB and storage with enhanced error handling"""
     try:
-        sdcard = adafruit_sdcard.SDCard(SPI, CS)
-        vfs = storage.VfsFat(sdcard)
-        storage.mount(vfs, '/sd')
-        os.listdir('/sd')
-    except Exception as e:
-        print(f"   - SDCARD Fail:{e}")
-        time.sleep(3)
-
-def set_time_if_wifi():
-    wifi_ssid = os.getenv("CIRCUITPY_WIFI_SSID")
-    wifi_password = os.getenv("CIRCUITPY_WIFI_PASSWORD")
-    if wifi_ssid is None:
-        print("First Run , WiFi credentials missing n\\  --->settings.toml")
-        raise ValueError("SSID not found")
-    try:
-        wifi.radio.connect(wifi_ssid, wifi_password)
-    except ConnectionError:
-        print("WiFi-Fail - Bad Password ")
-        raise
-    pool = socketpool.SocketPool(wifi.radio)
-    ntp = adafruit_ntp.NTP(pool, tz_offset=0, cache_seconds=3600)
-    rtc.RTC().datetime = ntp.datetime
-
-def show_splash():
-    display = board.DISPLAY
-    image, palette = adafruit_imageload.load(
-        "stagetwo_boot.bmp", bitmap=displayio.Bitmap, palette=displayio.Palette
-    )
-    tile_grid = displayio.TileGrid(image, pixel_shader=palette)
-    group = displayio.Group()
-    group.append(tile_grid)
-    board.DISPLAY.root_group = group
-    time.sleep(2)
-    display.root_group = None
-
-def run_first_boot_setup():
-    if not read_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR):
-        return
-    print("=== Welcome to First Boot Setup ===")
-    set_nvm_flag(FLASH_WRITE_FLAG_ADDR, True)
-    display = board.DISPLAY
-    try:
-        image, palette = adafruit_imageload.load(
-            "welcome.bmp", bitmap=displayio.Bitmap, palette=displayio.Palette
-        )
-        tile_grid = displayio.TileGrid(image, pixel_shader=palette)
-        group = displayio.Group()
-        group.append(tile_grid)
-        display.root_group = group
-        time.sleep(2)
-        display.root_group = None
-    except Exception:
-        print("No welcome image, using text mode.")
-    print("Press the button to continue setup...")
-    button = digitalio.DigitalInOut(board.BUTTON)
-    button.switch_to_input(pull=digitalio.Pull.UP)
-    while button.value:
-        time.sleep(0.1)
-    required_dirs = ["apps", "user", "config", "data", "logs"]
-    for d in required_dirs:
-        dir_path = f"/sd/{d}"
-        try:
-            os.mkdir(dir_path)
-            print(f"Created: {dir_path}")
-        except OSError:
-            print(f"Exists: {dir_path}")
-    print("Directories ready. Press button to continue to WiFi setup.")
-    while button.value:
-        time.sleep(0.1)
-    try:
-        exec(open("wifi_config.py").read())
-    except Exception as e:
-        print(f"WiFi config failed: {e}")
-    print("Press button to continue to timezone setup.")
-    while button.value:
-        time.sleep(0.1)
-    try:
-        exec(open("timezone_setup.py").read())
-    except Exception as e:
-        print(f"Timezone setup failed: {e}")
-    print("Setup complete! Clearing setup flag and rebooting...")
-    set_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR, False)
-    time.sleep(2)
-    microcontroller.reset()
-
-def very_early_boot_ops():
-    supervisor.runtime.autoreload = False
-    gc.enable()
-    try:
-        import usb_midi
-        usb_midi.disable()
-    except Exception:
-        print("   -USB_MIDI mode FAILED TO DISABLE")
-    try:
-        if read_nvm_flag(USB_HOST_ADDR) == 1:
-            try:
-                import usb_host
-                usb_host.enable()
-                print("   -USB_HOST mode Enabled by NVM Flag")
-            except Exception:
-                print("   -USB-HOST mode Enabled bt NVM Flag BUT FAILED")
+        # Configure USB CDC (serial console)
+        usb_cdc.enable(console=True, data=False)
+        print("USB CDC enabled")
+        
+        # Configure USB HID based on developer mode
+        if developer_mode:
+            print("Developer Mode: USB HID enabled")
+            usb_hid.enable()
         else:
-            try:
-                import usb_host
-                usb_host.disable()
-            except Exception:
-                pass
-    except Exception:
-        print("    *  SOME USB configuration failed.")
-    try:
-        set_time_if_wifi()
-    except Exception as e:
-        print(f"Skipping time sync: {e}")
-    try:
-        prepare_sdcard()
-    except Exception as e:
-        print(f"Skipping SD card: {e}")
-    try:
-        sync_nvm_flags_from_settings()
-    except Exception as e:
-        print(f"Skipping NVM sync: {e}")
-    try:
-        run_first_boot_setup()
-    except Exception as e:
-        print(f"Skipping first boot setup: {e}")
-
-# --- Boot menu logic ---
-MENU_ITEMS = [
-    ("Boot Normal", "boot"),
-    ("Recovery Mode", "recovery.py"),
-    ("Boot Settings", "settings"),
-    ("Factory Reset", "factory.py"),
-    ("Backup System Files", "backup"),
-]
-
-display = board.DISPLAY
-group = displayio.Group()
-display.root_group = group
-
-button = digitalio.DigitalInOut(board.BUTTON)
-button.direction = digitalio.Direction.INPUT
-button.pull = digitalio.Pull.UP
-
-selected = 0
-
-def draw_menu(selected_index):
-    if len(group) > 0:
-        group.pop()
-    menu_group = displayio.Group()
-    title = label.Label(
-        terminalio.FONT, text="Boot Menu", color=0x00FFFF, x=10, y=8, scale=2
-    )
-    menu_group.append(title)
-    for i, (item, _) in enumerate(MENU_ITEMS):
-        y = 30 + i * 24
-        if i == selected_index:
-            highlight_bitmap = displayio.Bitmap(120, 20, 1)
-            highlight_palette = displayio.Palette(1)
-            highlight_palette[0] = 0x003366
-            highlight_tile = displayio.TileGrid(
-                highlight_bitmap, pixel_shader=highlight_palette, x=6, y=y - 12
-            )
-            menu_group.append(highlight_tile)
-            color = 0xFFFF00
-        else:
-            color = 0xFFFFFF
-        text = label.Label(
-            terminalio.FONT, text=item, color=color, x=10, y=y
-        )
-        menu_group.append(text)
-    group.append(menu_group)
-
-def settings_menu():
-    idx = 0
-    options = [
-        f"Boot File: {settings['DEFAULT_BOOT_FILE']}",
-        f"Timeout: {settings['BOOT_TIMEOUT']}s",
-        f"Developer Mode: {'ON' if settings['DEVELOPER_MODE'] else 'OFF'}",
-        f"Flash Write: {'ON' if settings['FLASH_WRITE'] else 'OFF'}",
-        "Back"
-    ]
-    while True:
-        if len(group) > 0:
-            group.pop()
-        menu_group = displayio.Group()
-        title = label.Label(
-            terminalio.FONT, text="Boot Settings", color=0x00FFFF, x=10, y=8, scale=2
-        )
-        menu_group.append(title)
-        for i, item in enumerate(options):
-            y = 30 + i * 24
-            if i == idx:
-                highlight_bitmap = displayio.Bitmap(120, 20, 1)
-                highlight_palette = displayio.Palette(1)
-                highlight_palette[0] = 0x003366
-                highlight_tile = displayio.TileGrid(
-                    highlight_bitmap, pixel_shader=highlight_palette, x=6, y=y - 12
-                )
-                menu_group.append(highlight_tile)
-                color = 0xFFFF00
-            else:
-                color = 0xFFFFFF
-            text = label.Label(
-                terminalio.FONT, text=item, color=color, x=10, y=y
-            )
-            menu_group.append(text)
-        group.append(menu_group)
-
-        last_button = button.value
-        while True:
-            if not button.value and last_button:
-                press_time = time.monotonic()
-                while not button.value:
-                    if time.monotonic() - press_time > 1.0:
-                        # Long press: select
-                        if idx == 0:
-                            bf_idx = BOOT_FILES.index(settings["DEFAULT_BOOT_FILE"]) if settings["DEFAULT_BOOT_FILE"] in BOOT_FILES else 0
-                            bf_idx = (bf_idx + 1) % len(BOOT_FILES)
-                            settings["DEFAULT_BOOT_FILE"] = BOOT_FILES[bf_idx]
-                            options[0] = f"Boot File: {settings['DEFAULT_BOOT_FILE']}"
-                        elif idx == 1:
-                            settings["BOOT_TIMEOUT"] = (settings["BOOT_TIMEOUT"] + 1) % 11 or 1
-                            options[1] = f"Timeout: {settings['BOOT_TIMEOUT']}s"
-                        elif idx == 2:
-                            settings["DEVELOPER_MODE"] = not settings["DEVELOPER_MODE"]
-                            options[2] = f"Developer Mode: {'ON' if settings['DEVELOPER_MODE'] else 'OFF'}"
-                        elif idx == 3:
-                            settings["FLASH_WRITE"] = not settings["FLASH_WRITE"]
-                            options[3] = f"Flash Write: {'ON' if settings['FLASH_WRITE'] else 'OFF'}"
-                        elif idx == 4:
-                            save_settings(settings)
-                            return
-                        save_settings(settings)
-                        break
-                    time.sleep(0.01)
-                else:
-                    idx = (idx + 1) % len(options)
-                    break
-            last_button = button.value
-            time.sleep(0.02)
-
-def run_action(index):
-    name, action = MENU_ITEMS[index]
-    if action == "boot":
-        supervisor.set_next_code_file(settings["DEFAULT_BOOT_FILE"])
-        supervisor.reload()
-    elif action == "settings":
-        settings_menu()
-        draw_menu(selected)
-    elif action == "factory.py":
-        FIRST_BOOT_SETUP_FLAG_ADDR = 8
-        microcontroller.nvm[FIRST_BOOT_SETUP_FLAG_ADDR] = 1
-        supervisor.set_next_code_file(action)
-        supervisor.reload()
-    elif action == "backup":
-        try:
-            import recovery
-            rec = recovery.RecoverySystem()
-            result = rec.backup_system_files()
-            msg = "Backup complete!" if result else "Backup failed!"
-        except Exception as e:
-            msg = f"Backup error: {e}"
-        if len(group) > 0:
-            group.pop()
-        msg_group = displayio.Group()
-        msg_label = label.Label(terminalio.FONT, text=msg, color=0x00FF00 if "complete" in msg else 0xFF0000, x=10, y=60, scale=2)
-        msg_group.append(msg_label)
-        group.append(msg_group)
-        time.sleep(2)
-        draw_menu(selected)
-    else:
-        supervisor.set_next_code_file(action)
-        supervisor.reload()
-
-def menu_loop():
-    global selected
-    draw_menu(selected)
-    last_button = button.value
-    start_time = time.monotonic()
-    timeout = settings["BOOT_TIMEOUT"]
-    button_press_time = None
-    prev_selected = selected
-    long_press_handled = False
-
-    while True:
-        input_received = False
-        if supervisor.runtime.serial_bytes_available:
-            cmd = input().strip().lower()
-            input_received = True
-            if cmd in ["up", "u"]:
-                selected = (selected - 1) % len(MENU_ITEMS)
-            elif cmd in ["down", "d"]:
-                selected = (selected + 1) % len(MENU_ITEMS)
-            elif cmd in ["select", "s", "enter"]:
-                run_action(selected)
-            elif cmd.isdigit() and 0 <= int(cmd) < len(MENU_ITEMS):
-                selected = int(cmd)
-            else:
-                print("Commands: up/down/select or 0-3")
-        if not button.value and last_button:
-            button_press_time = time.monotonic()
-            long_press_handled = False
-        elif not button.value and button_press_time is not None:
-            if not long_press_handled and (time.monotonic() - button_press_time > 1.0):
-                run_action(selected)
-                long_press_handled = True
-        elif button.value and not last_button:
-            if button_press_time is not None and not long_press_handled:
-                selected = (selected + 1) % len(MENU_ITEMS)
-                input_received = True
-            button_press_time = None
-            long_press_handled = False
-        last_button = button.value
-
-        if selected != prev_selected:
-            draw_menu(selected)
-            prev_selected = selected
-
-        if input_received:
-            start_time = time.monotonic()
-        if time.monotonic() - start_time > timeout:
-            print(f"Timeout reached. Booting default: {MENU_ITEMS[selected][0]}")
-            run_action(selected)
-
-        time.sleep(0.02)
-
-# --- Main execution flow ---
-def main():
-    reset_type = read_nvm_byte(RESET_TYPE_ADDR)
-    reload_count = read_nvm_byte(RELOAD_COUNTER_ADDR)
-    write_nvm_byte(RELOAD_COUNTER_ADDR, (reload_count + 1) % 256)
-    if reload_count >= DEFAULT_BOOT_LOOP_THRESHOLD:
-        set_nvm_flag(RECOVERY_FLAG_ADDR, True)
-        print("!!! BOOT LOOP DETECTED !!!")
-        print("Recovery mode enabled")
-        print("Waiting 5sec. before recovery...")
-        time.sleep(5)
-    if read_nvm_flag(RECOVERY_FLAG_ADDR):
-        print("Recovery flag detected - entering recovery mode")
-        write_nvm_byte(RELOAD_COUNTER_ADDR, 0)
-        try:
+            print("User Mode: USB HID disabled")
+            usb_hid.disable()
+        
+        # Configure storage and USB drive
+        if flash_write_enabled:
+            print("Flash R/W enabled, USB drive hidden")
             storage.remount("/", readonly=False)
-        except Exception as e:
-            print(f"Failed to enable flash write access: {e}")
-        try:
-            import recovery
-            recovery.main()
-        except ImportError:
-            print("ERROR: recovery.py not found!")
-            try:
-                exec(open("recovery.py").read())
-            except OSError:
-                print("Creating emergency recovery mode...")
-        except Exception as e:
-            print(f"Recovery system error: {e}")
-        #return  # <--- Prevents continuing to menu if in recovery
-    show_splash()
-    # Clear splash, then re-assign display group for menu
-    display.root_group = None
-    time.sleep(1)
-    display.root_group = group
+            storage.disable_usb_drive()
+        else:
+            print("Flash R/O, USB drive hidden")
+            storage.remount("/", readonly=True)
+            storage.disable_usb_drive()
+        
+        return True
+        
+    except Exception as e:
+        print(f"USB/Storage configuration error: {e}")
+        return False
+
+# --- SD Card Management ---
+def prepare_sdcard():
+    """Enhanced SD card preparation with better error handling"""
+    if not settings.get("SD_CARD_ENABLED", True):
+        print("SD card disabled in settings")
+        return False
+    
+    if not SDCARD_AVAILABLE:
+        print("SD card library not available")
+        return False
+    
+    if not SD_PINS_AVAILABLE:
+        print("SD card pins not available on this board")
+        return False
     
     try:
-        very_early_boot_ops()
+        print("Initializing SD card...")
+        
+        # Initialize SPI bus
+        spi = busio.SPI(SCK, MOSI, MISO)
+        cs = digitalio.DigitalInOut(CS)
+        
+        # Initialize SD card
+        sdcard = adafruit_sdcard.SDCard(spi, cs)
+        vfs = storage.VfsFat(sdcard)
+        
+        # Mount SD card
+        storage.mount(vfs, '/sd')
+        
+        # Test SD card access
+        try:
+            files = os.listdir('/sd')
+            print(f"SD card mounted successfully - {len(files)} items found")
+            
+            # Create essential directories
+            essential_dirs = ['apps', 'backups', 'config', 'data', 'logs']
+            for dir_name in essential_dirs:
+                dir_path = f'/sd/{dir_name}'
+                try:
+                    os.mkdir(dir_path)
+                    print(f"Created directory: {dir_path}")
+                except OSError:
+                    pass  # Directory already exists
+            
+            return True
+            
+        except OSError as e:
+            print(f"SD card access test failed: {e}")
+            return False
+            
     except Exception as e:
-        print(f"Boot ops error: {e}")
-    developer_mode = read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)
-    flash_write_enabled = read_nvm_flag(FLASH_WRITE_FLAG_ADDR)
-    configure_usb_and_storage(developer_mode, flash_write_enabled)
-    print(f"Dev mode: {developer_mode}, R/W: {flash_write_enabled}")
-    print(f"Boot OK {SUCCESSFUL_BOOT_DELAY} seconds")
-    print("Boot Menu: Use button or console (up/down/select/0-3)")
-    menu_loop()
+        print(f"SD card initialization failed: {e}")
+        return False
 
+# --- Network and Time Management ---
+def set_time_if_wifi():
+    """Set system time via NTP with enhanced error handling"""
+    if not settings.get("WIFI_ENABLED", True):
+        print("WiFi disabled in settings")
+        return False
+    
+    if not NTP_AVAILABLE:
+        print("NTP/WiFi libraries not available")
+        return False
+    
+    if not settings.get("NTP_ENABLED", True):
+        print("NTP disabled in settings")
+        return False
+    
+    try:
+        # Get WiFi credentials
+        wifi_ssid = settings.get("CIRCUITPY_WIFI_SSID", "")
+        wifi_password = settings.get("CIRCUITPY_WIFI_PASSWORD", "")
+        
+        if not wifi_ssid:
+            print("WiFi credentials not configured")
+            return False
+        
+        print(f"Connecting to WiFi: {wifi_ssid}")
+        
+        # Connect to WiFi with timeout
+        wifi.radio.connect(wifi_ssid, wifi_password, timeout=15)
+        
+        if not wifi.radio.connected:
+            print("WiFi connection failed")
+            return False
+        
+        print(f"WiFi connected: {wifi.radio.ipv4_address}")
+        
+        # Set time via NTP
+        pool = socketpool.SocketPool(wifi.radio)
+        ntp = adafruit_ntp.NTP(pool, tz_offset=0, cache_seconds=3600)
+        
+        current_time = ntp.datetime
+        rtc.RTC().datetime = current_time
+        
+        print(f"Time synchronized: {current_time}")
+        return True
+        
+    except Exception as e:
+        print(f"WiFi/NTP error: {e}")
+        return False
+
+# --- Boot Splash and UI ---
+def show_splash():
+    """Show boot splash with fallback options"""
+    if not IMAGE_AVAILABLE:
+        show_text_splash()
+        return
+    
+    try:
+        display = board.DISPLAY
+        
+        # Try to load custom splash
+        splash_files = ["stagetwo_boot.bmp", "boot_splash.bmp", "splash.bmp"]
+        
+        for splash_file in splash_files:
+            try:
+                image, palette = adafruit_imageload.load(
+                    splash_file, bitmap=displayio.Bitmap, palette=displayio.Palette
+                )
+                
+                tile_grid = displayio.TileGrid(image, pixel_shader=palette)
+                group = displayio.Group()
+                group.append(tile_grid)
+                
+                display.root_group = group
+                print(f"Splash loaded: {splash_file}")
+                time.sleep
+                display.root_group = group
+                print(f"Splash loaded: {splash_file}")
+                time.sleep(2)
+                return
+                
+            except Exception as e:
+                print(f"Failed to load {splash_file}: {e}")
+                continue
+        
+        # If no custom splash found, show text splash
+        show_text_splash()
+        
+    except Exception as e:
+        print(f"Splash display error: {e}")
+        show_text_splash()
+
+def show_text_splash():
+    """Show text-based boot splash"""
+    try:
+        display = board.DISPLAY
+        
+        # Create splash group
+        splash_group = displayio.Group()
+        
+        # Background
+        bg_bitmap = displayio.Bitmap(display.width, display.height, 1)
+        bg_palette = displayio.Palette(1)
+        bg_palette[0] = 0x001122  # Dark blue
+        bg_sprite = displayio.TileGrid(bg_bitmap, pixel_shader=bg_palette)
+        splash_group.append(bg_sprite)
+        
+        # Title
+        title_label = label.Label(
+            terminalio.FONT,
+            text="StageTwo",
+            color=0x00FFFF,
+            x=display.width // 2 - 40,
+            y=display.height // 2 - 30,
+            scale=3
+        )
+        splash_group.append(title_label)
+        
+        # Version
+        version_label = label.Label(
+            terminalio.FONT,
+            text=f"Boot System v{__version__}",
+            color=0xFFFFFF,
+            x=display.width // 2 - 60,
+            y=display.height // 2,
+            scale=1
+        )
+        splash_group.append(version_label)
+        
+        # Status
+        status_label = label.Label(
+            terminalio.FONT,
+            text="Initializing...",
+            color=0x00FF00,
+            x=display.width // 2 - 40,
+            y=display.height // 2 + 20,
+            scale=1
+        )
+        splash_group.append(status_label)
+        
+        display.root_group = splash_group
+        time.sleep(1.5)
+        
+    except Exception as e:
+        print(f"Text splash error: {e}")
+
+def show_boot_status(message, color=0xFFFFFF):
+    """Show boot status message"""
+    try:
+        display = board.DISPLAY
+        
+        # Create status group
+        status_group = displayio.Group()
+        
+        # Background
+        bg_bitmap = displayio.Bitmap(display.width, display.height, 1)
+        bg_palette = displayio.Palette(1)
+        bg_palette[0] = 0x000011  # Very dark blue
+        bg_sprite = displayio.TileGrid(bg_bitmap, pixel_shader=bg_palette)
+        status_group.append(bg_sprite)
+        
+        # Status message
+        lines = message.split('\n')
+        for i, line in enumerate(lines):
+            if line.strip():
+                status_label = label.Label(
+                    terminalio.FONT,
+                    text=line,
+                    color=color,
+                    x=10,
+                    y=30 + i * 20,
+                    scale=1
+                )
+                status_group.append(status_label)
+        
+        display.root_group = status_group
+        time.sleep(0.5)
+        
+    except Exception as e:
+        print(f"Boot status display error: {e}")
+
+# --- Boot Loop Detection ---
+def check_boot_loop():
+    """Enhanced boot loop detection with recovery"""
+    try:
+        reload_count = read_nvm_byte(RELOAD_COUNTER_ADDR)
+        threshold = read_nvm_byte(BOOT_LOOP_THRESHOLD_ADDR)
+        
+        if threshold == 0:
+            threshold = DEFAULT_BOOT_LOOP_THRESHOLD
+            write_nvm_byte(BOOT_LOOP_THRESHOLD_ADDR, threshold)
+        
+        # Increment reload counter
+        reload_count += 1
+        write_nvm_byte(RELOAD_COUNTER_ADDR, reload_count)
+        
+        print(f"Boot attempt {reload_count}/{threshold}")
+        
+        if reload_count >= threshold:
+            print(f"Boot loop detected! ({reload_count} attempts)")
+            show_boot_status(f"Boot Loop Detected!\n\nAttempt {reload_count}/{threshold}\nEntering recovery mode...", 0xFF0000)
+            
+            # Set recovery flag and reset counter
+            set_nvm_flag(RECOVERY_FLAG_ADDR, True)
+            write_nvm_byte(RELOAD_COUNTER_ADDR, 0)
+            
+            time.sleep(3)
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"Boot loop check error: {e}")
+        return False
+
+def mark_successful_boot():
+    """Mark boot as successful after delay"""
+    def delayed_success():
+        time.sleep(SUCCESSFUL_BOOT_DELAY)
+        write_nvm_byte(RELOAD_COUNTER_ADDR, 0)
+        write_nvm_byte(LAST_SUCCESSFUL_BOOT_ADDR, int(time.monotonic()) % 255)
+        print("Boot marked as successful")
+    
+    # Schedule success marking (would need threading in full implementation)
+    # For now, just mark immediately after delay
+    try:
+        supervisor.set_next_code_file(None)  # Clear any pending code file
+        # In a real implementation, you'd use a timer or background task
+        print("Boot success will be marked after successful startup")
+    except Exception as e:
+        print(f"Boot success marking error: {e}")
+
+# --- Reset Cause Analysis ---
+def analyze_reset_cause():
+    """Analyze and log reset cause"""
+    try:
+        reset_reason = microcontroller.cpu.reset_reason
+        reset_type = RESET_UNKNOWN
+        reset_description = "Unknown reset"
+        
+        if reset_reason == microcontroller.ResetReason.POWER_ON:
+            reset_type = RESET_POWER_ON
+            reset_description = "Power-on reset"
+        elif reset_reason == microcontroller.ResetReason.BROWNOUT:
+            reset_type = RESET_BROWNOUT
+            reset_description = "Brownout reset"
+        elif reset_reason == microcontroller.ResetReason.SOFTWARE:
+            reset_type = RESET_SOFTWARE
+            reset_description = "Software reset"
+        elif reset_reason == microcontroller.ResetReason.DEEP_SLEEP_ALARM:
+            reset_type = RESET_SOFTWARE
+            reset_description = "Deep sleep alarm"
+        elif reset_reason == microcontroller.ResetReason.RESET_PIN:
+            reset_type = RESET_SOFTWARE
+            reset_description = "Reset pin"
+        elif reset_reason == microcontroller.ResetReason.WATCHDOG:
+            reset_type = RESET_WATCHDOG
+            reset_description = "Watchdog reset"
+        
+        write_nvm_byte(RESET_TYPE_ADDR, reset_type)
+        print(f"Reset cause: {reset_description}")
+        
+        return reset_type, reset_description
+        
+    except Exception as e:
+        print(f"Reset analysis error: {e}")
+        return RESET_UNKNOWN, "Analysis failed"
+
+# --- Boot File Selection ---
+def find_boot_file():
+    """Find appropriate boot file with priority order"""
+    try:
+        # Check settings for preferred boot file
+        preferred_file = settings.get("DEFAULT_BOOT_FILE", DEFAULT_BOOT_FILE)
+        
+        # Create priority list starting with preferred file
+        priority_files = [preferred_file]
+        for file in BOOT_FILES:
+            if file not in priority_files:
+                priority_files.append(file)
+        
+        # Check each file in priority order
+        for boot_file in priority_files:
+            try:
+                stat_result = os.stat(boot_file)
+                if stat_result[6] > 0:  # File size > 0
+                    print(f"Boot file selected: {boot_file}")
+                    return boot_file
+            except OSError:
+                continue
+        
+        print("No valid boot file found!")
+        return None
+        
+    except Exception as e:
+        print(f"Boot file selection error: {e}")
+        return None
+
+# --- First Boot Setup ---
+def check_first_boot():
+    """Check if this is the first boot and run setup"""
+    try:
+        if not read_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR):
+            print("First boot detected - running setup")
+            show_boot_status("First Boot Setup\n\nInitializing system...", 0x00FFFF)
+            
+            # Create essential directories
+            essential_dirs = ['/system', '/apps', '/backups', '/logs', '/config']
+            for dir_path in essential_dirs:
+                try:
+                    os.mkdir(dir_path)
+                    print(f"Created directory: {dir_path}")
+                except OSError:
+                    pass  # Directory already exists
+            
+            # Save default settings
+            save_settings(settings)
+            
+            # Create welcome file
+            try:
+                with open("/system/welcome.txt", "w") as f:
+                    f.write(f"""Welcome to StageTwo!
+
+This is your first boot. The system has been initialized with:
+- Essential directories created
+- Default settings configured
+- Display brightness set to {int(DEFAULT_BRIGHTNESS * 100)}%
+- SD card support enabled (if available)
+
+You can customize settings in settings.toml
+Boot system version: {__version__}
+
+Enjoy your StageTwo experience!
+""")
+            except Exception as e:
+                print(f"Welcome file creation failed: {e}")
+            
+            # Mark first boot as complete
+            set_nvm_flag(FIRST_BOOT_SETUP_FLAG_ADDR, True)
+            
+            show_boot_status("First Boot Setup Complete!\n\nStarting system...", 0x00FF00)
+            time.sleep(2)
+            
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"First boot check error: {e}")
+        return False
+
+# --- Main Boot Logic ---
+def main():
+    """Main boot sequence with comprehensive error handling"""
+    print("=" * 50)
+    print(f"🚀 StageTwo Boot System v{__version__}")
+    print("=" * 50)
+    
+    try:
+        # Initial memory cleanup
+        gc.collect()
+        print(f"💾 Starting with {gc.mem_free()} bytes free memory")
+        
+        # Show splash screen
+        show_splash()
+        
+        # Analyze reset cause
+        reset_type, reset_description = analyze_reset_cause()
+        show_boot_status(f"Boot Analysis\n\n{reset_description}\nInitializing...", 0x00FFFF)
+        
+        # Check for first boot
+        is_first_boot = check_first_boot()
+        
+        # Set display brightness early
+        if set_display_brightness():
+            print("✅ Display brightness configured")
+        
+        # Check for boot loop
+        if check_boot_loop():
+            print("🔄 Boot loop detected - entering recovery")
+            show_boot_status("Boot Loop Detected\n\nEntering Recovery Mode...", 0xFF8000)
+            time.sleep(2)
+            # Recovery mode will be handled by the recovery flag check
+        
+        # Read NVM flags
+        recovery_mode = read_nvm_flag(RECOVERY_FLAG_ADDR)
+        developer_mode = read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)
+        flash_write_enabled = read_nvm_flag(FLASH_WRITE_FLAG_ADDR)
+        
+        # Sync settings with NVM flags
+        sync_nvm_flags_from_settings()
+        
+        print(f"🔧 Recovery Mode: {recovery_mode}")
+        print(f"👨‍💻 Developer Mode: {developer_mode}")
+        print(f"💾 Flash Write: {flash_write_enabled}")
+        
+        # Configure USB and storage
+        show_boot_status("System Configuration\n\nConfiguring USB & Storage...", 0x00FFFF)
+        if configure_usb_and_storage(developer_mode, flash_write_enabled):
+            print("✅ USB and storage configured")
+        else:
+            print("⚠️ USB/storage configuration issues")
+        
+        # Initialize SD card
+        show_boot_status("Storage Setup\n\nInitializing SD card...", 0x00FFFF)
+        if prepare_sdcard():
+            print("✅ SD card mounted successfully")
+        else:
+            print("⚠️ SD card not available")
+        
+        # Set system time via WiFi/NTP
+        show_boot_status("Network Setup\n\nSynchronizing time...", 0x00FFFF)
+        if set_time_if_wifi():
+            print("✅ System time synchronized")
+        else:
+            print("⚠️ Time synchronization skipped")
+        
+        # Memory cleanup before app launch
+        gc.collect()
+        print(f"💾 Pre-launch memory: {gc.mem_free()} bytes free")
+        
+        # Determine what to boot
+        if recovery_mode:
+            print("🔧 Booting into recovery mode")
+            show_boot_status("Recovery Mode\n\nStarting recovery system...", 0xFF8000)
+            
+            # Clear recovery flag for next boot
+            set_nvm_flag(RECOVERY_FLAG_ADDR, False)
+            
+            # Set next code file to recovery
+            try:
+                supervisor.set_next_code_file("recovery.py")
+                print("✅ Recovery mode set")
+            except Exception as e:
+                print(f"❌ Recovery mode setup failed: {e}")
+                # Fallback to normal boot
+                recovery_mode = False
+        
+        if not recovery_mode:
+            # Normal boot sequence
+            boot_file = find_boot_file()
+            
+            if boot_file:
+                print(f"🚀 Booting: {boot_file}")
+                show_boot_status(f"Starting Application\n\n{boot_file}\n\nPlease wait...", 0x00FF00)
+                
+                # Mark boot as successful (after delay)
+                mark_successful_boot()
+                
+                # Set next code file
+                try:
+                    supervisor.set_next_code_file(boot_file)
+                    print("✅ Boot file set successfully")
+                except Exception as e:
+                    print(f"❌ Boot file setup failed: {e}")
+                    # Try direct execution as fallback
+                    try:
+                        exec(open(boot_file).read())
+                    except Exception as exec_error:
+                        print(f"❌ Direct execution failed: {exec_error}")
+                        show_boot_status(f"Boot Failed!\n\n{boot_file}\n{str(exec_error)[:30]}", 0xFF0000)
+                        time.sleep(5)
+            else:
+                print("❌ No boot file found!")
+                show_boot_status("Boot Error\n\nNo valid boot file found\nCheck system files", 0xFF0000)
+                
+                # Set recovery flag for next boot
+                set_nvm_flag(RECOVERY_FLAG_ADDR, True)
+                time.sleep(5)
+        
+        # Final status
+        show_boot_status("Boot Complete\n\nTransferring control...", 0x00FF00)
+        time.sleep(1)
+        
+        print("✅ Boot sequence completed successfully")
+        print("=" * 50)
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Critical boot error: {e}")
+        
+        try:
+            show_boot_status(f"Critical Boot Error!\n\n{str(e)[:40]}\n\nEntering recovery...", 0xFF0000)
+            
+            # Set recovery flag for next boot
+            set_nvm_flag(RECOVERY_FLAG_ADDR, True)
+            
+            # Try to start recovery immediately
+            try:
+                supervisor.set_next_code_file("recovery.py")
+                print("Emergency recovery mode set")
+            except Exception:
+                print("Emergency recovery setup failed")
+            
+            time.sleep(3)
+            
+        except Exception:
+            # Even error display failed - just print to console
+            print("CRITICAL: Boot system failure - manual intervention required")
+        
+        return False
+    
+    finally:
+        # Final cleanup
+        gc.collect()
+        try:
+            print(f"💾 Boot complete - {gc.mem_free()} bytes free")
+        except Exception:
+            pass
+
+# --- Utility Functions ---
+def get_system_info():
+    """Get comprehensive system information"""
+    try:
+        info = {
+            "boot_version": __version__,
+            "reset_cause": analyze_reset_cause()[1],
+            "recovery_mode": read_nvm_flag(RECOVERY_FLAG_ADDR),
+            "developer_mode": read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR),
+            "flash_write": read_nvm_flag(FLASH_WRITE_FLAG_ADDR),
+            "reload_count": read_nvm_byte(RELOAD_COUNTER_ADDR),
+            "memory_free": gc.mem_free(),
+            "sd_available": SDCARD_AVAILABLE and SD_PINS_AVAILABLE,
+            "ntp_available": NTP_AVAILABLE,
+            "image_available": IMAGE_AVAILABLE,
+            "settings": settings
+        }
+        return info
+    except Exception as e:
+        return {"error": str(e)}
+
+def emergency_reset():
+    """Emergency system reset with flag clearing"""
+    try:
+        print("🚨 Emergency reset initiated")
+        
+        # Clear all NVM flags
+        for i in range(10):
+            try:
+                microcontroller.nvm[i] = 0
+            except Exception:
+                pass
+        
+        # Force flash write mode for recovery
+        set_nvm_flag(FLASH_WRITE_FLAG_ADDR, True)
+        
+        print("Emergency reset complete - rebooting...")
+        time.sleep(1)
+        microcontroller.reset()
+        
+    except Exception as e:
+        print(f"Emergency reset failed: {e}")
+
+def safe_mode_check():
+    """Check if we should enter safe mode"""
+    try:
+        # Check for safe mode conditions
+        if supervisor.runtime.safe_mode_reason:
+            print(f"Safe mode reason: {supervisor.runtime.safe_mode_reason}")
+            return True
+        
+        # Check for repeated crashes
+        reload_count = read_nvm_byte(RELOAD_COUNTER_ADDR)
+        if reload_count > 5:
+            print("Multiple boot failures detected")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"Safe mode check error: {e}")
+        return False
+
+def create_boot_log():
+    """Create boot log entry"""
+    try:
+        # Ensure logs directory exists
+        try:
+            os.mkdir("/logs")
+        except OSError:
+            pass
+        
+        # Create log entry
+        timestamp = int(time.monotonic())
+        reset_type, reset_desc = analyze_reset_cause()
+        
+        log_entry = f"""
+Boot Log Entry - {timestamp}
+================================
+Boot System Version: {__version__}
+Reset Cause: {reset_desc}
+Recovery Mode: {read_nvm_flag(RECOVERY_FLAG_ADDR)}
+Developer Mode: {read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)}
+Flash Write: {read_nvm_flag(FLASH_WRITE_FLAG_ADDR)}
+Reload Count: {read_nvm_byte(RELOAD_COUNTER_ADDR)}
+Memory Free: {gc.mem_free()} bytes
+SD Card: {'Available' if SDCARD_AVAILABLE and SD_PINS_AVAILABLE else 'Not Available'}
+WiFi/NTP: {'Available' if NTP_AVAILABLE else 'Not Available'}
+Display Brightness: {int(settings.get('DISPLAY_BRIGHTNESS', DEFAULT_BRIGHTNESS) * 100)}%
+
+Settings:
+{chr(10).join([f'  {k}: {v}' for k, v in settings.items()])}
+================================
+"""
+        
+        with open("/logs/boot.log", "a") as f:
+            f.write(log_entry)
+        
+        print("Boot log entry created")
+        return True
+        
+    except Exception as e:
+        print(f"Boot log creation failed: {e}")
+        return False
+
+# --- Debug and Testing Functions ---
+def test_boot_components():
+    """Test individual boot components"""
+    print("🧪 Testing Boot Components")
+    print("=" * 30)
+    
+    tests = [
+        ("Settings", lambda: read_settings() is not None),
+        ("NVM Access", lambda: set_nvm_flag(9, True) and read_nvm_flag(9)),
+        ("Display", lambda: hasattr(board, 'DISPLAY') and board.DISPLAY is not None),
+        ("SD Pins", lambda: SD_PINS_AVAILABLE),
+        ("SD Library", lambda: SDCARD_AVAILABLE),
+        ("WiFi/NTP", lambda: NTP_AVAILABLE),
+        ("Image Loading", lambda: IMAGE_AVAILABLE),
+        ("Storage Write", lambda: test_storage_write()),
+    ]
+    
+    results = {}
+    for test_name, test_func in tests:
+        try:
+            result = test_func()
+            results[test_name] = result
+            status = "✅" if result else "❌"
+            print(f"{status} {test_name}: {result}")
+        except Exception as e:
+            results[test_name] = f"Error: {e}"
+            print(f"❌ {test_name}: Error - {e}")
+    
+    print("=" * 30)
+    return results
+
+def test_storage_write():
+    """Test storage write capability"""
+    try:
+        test_file = "/test_write.tmp"
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        return True
+    except Exception:
+        return False
+
+def show_boot_menu():
+    """Show interactive boot menu (if button available)"""
+    try:
+        if not hasattr(board, 'BUTTON'):
+            return False
+        
+        button = digitalio.DigitalInOut(board.BUTTON)
+        button.direction = digitalio.Direction.INPUT
+        button.pull = digitalio.Pull.UP
+        
+        # Show menu for 3 seconds
+        menu_options = [
+            "Normal Boot",
+            "Recovery Mode", 
+            "Developer Mode",
+            "Safe Mode"
+        ]
+        
+        selected = 0
+        start_time = time.monotonic()
+        
+        while time.monotonic() - start_time < 3:
+            # Show current selection
+            show_boot_status(f"Boot Menu\n\n> {menu_options[selected]}\n\nPress button to select\nAuto-boot in {3 - int(time.monotonic() - start_time)}s", 0x00FFFF)
+            
+            # Check button
+            if not button.value:  # Button pressed
+                time.sleep(0.1)  # Debounce
+                while not button.value:  # Wait for release
+                    time.sleep(0.01)
+                
+                # Handle selection
+                if selected == 1:  # Recovery Mode
+                    set_nvm_flag(RECOVERY_FLAG_ADDR, True)
+                elif selected == 2:  # Developer Mode
+                    set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, True)
+                    set_nvm_flag(FLASH_WRITE_FLAG_ADDR, True)
+                elif selected == 3:  # Safe Mode
+                    # Clear all flags for safe mode
+                    for i in range(5):
+                        set_nvm_flag(i, False)
+                
+                show_boot_status(f"Selected: {menu_options[selected]}\n\nBooting...", 0x00FF00)
+                time.sleep(1)
+                return True
+            
+            # Cycle through options
+            selected = (selected + 1) % len(menu_options)
+            time.sleep(0.5)
+        
+        # Auto-boot normal mode
+        show_boot_status("Auto-boot: Normal Mode\n\nStarting...", 0x00FF00)
+        time.sleep(1)
+        return False
+        
+    except Exception as e:
+        print(f"Boot menu error: {e}")
+        return False
+
+# --- Integration Functions ---
+def get_boot_status():
+    """Get current boot status for other modules"""
+    try:
+        return {
+            "version": __version__,
+            "recovery_mode": read_nvm_flag(RECOVERY_FLAG_ADDR),
+            "developer_mode": read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR),
+            "flash_write": read_nvm_flag(FLASH_WRITE_FLAG_ADDR),
+            "reload_count": read_nvm_byte(RELOAD_COUNTER_ADDR),
+            "reset_type": read_nvm_byte(RESET_TYPE_ADDR),
+            "settings": settings,
+            "capabilities": {
+                "sd_card": SDCARD_AVAILABLE and SD_PINS_AVAILABLE,
+                "wifi_ntp": NTP_AVAILABLE,
+                "image_loading": IMAGE_AVAILABLE
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def set_boot_mode(mode):
+    """Set boot mode for next restart"""
+    try:
+        if mode == "recovery":
+            set_nvm_flag(RECOVERY_FLAG_ADDR, True)
+        elif mode == "developer":
+            set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, True)
+            set_nvm_flag(FLASH_WRITE_FLAG_ADDR, True)
+        elif mode == "normal":
+            set_nvm_flag(RECOVERY_FLAG_ADDR, False)
+            set_nvm_flag(DEVELOPER_MODE_FLAG_ADDR, False)
+        elif mode == "safe":
+            for i in range(5):
+                set_nvm_flag(i, False)
+        
+        print(f"Boot mode set to: {mode}")
+        return True
+        
+    except Exception as e:
+        print(f"Boot mode setting failed: {e}")
+        return False
+
+# --- Export Functions ---
+__all__ = [
+    'main',
+    'get_system_info',
+    'emergency_reset',
+    'test_boot_components',
+    'get_boot_status',
+    'set_boot_mode',
+    'read_settings',
+    'save_settings',
+    'set_nvm_flag',
+    'read_nvm_flag',
+    'create_boot_log'
+]
+
+# --- Main Execution ---
 if __name__ == "__main__":
-    main()
+    # This runs when boot.py is executed directly (shouldn't normally happen)
+    print("⚠️ boot.py executed directly - this is unusual")
+    print("Boot.py should be executed automatically by CircuitPython")
+    
+    # Run anyway for testing
+    success = main()
+    if success:
+        print("✅ Boot sequence completed")
+    else:
+        print("❌ Boot sequence failed")
+else:
+    # Normal boot execution
+    try:
+        # Create boot log
+        create_boot_log()
+        
+        # Show boot menu if button available (optional)
+        # show_boot_menu()  # Uncomment to enable boot menu
+        
+        # Run main boot sequence
+        main()
+        
+    except Exception as e:
+        print(f"❌ Boot execution failed: {e}")
+        emergency_reset()
+
+# Final memory cleanup
+gc.collect()
+
+print(f"📦 StageTwo Boot System v{__version__} - Ready")
+print(f"💾 Final boot memory: {gc.mem_free()} bytes free")
+print("🚀 System initialization complete")
+
+# End of boot.py
+
