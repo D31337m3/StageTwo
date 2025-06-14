@@ -945,7 +945,7 @@ def safe_mode_check():
     except Exception as e:
         print(f"Safe mode check error: {e}")
         return False
-
+    
 def create_boot_log():
     """Create boot log entry"""
     try:
@@ -959,24 +959,30 @@ def create_boot_log():
         timestamp = int(time.monotonic())
         reset_type, reset_desc = analyze_reset_cause()
         
-        log_entry = f"""
-Boot Log Entry - {timestamp}
-================================
-Boot System Version: {__version__}
-Reset Cause: {reset_desc}
-Recovery Mode: {read_nvm_flag(RECOVERY_FLAG_ADDR)}
-Developer Mode: {read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)}
-Flash Write: {read_nvm_flag(FLASH_WRITE_FLAG_ADDR)}
-Reload Count: {read_nvm_byte(RELOAD_COUNTER_ADDR)}
-Memory Free: {gc.mem_free()} bytes
-SD Card: {'Available' if SDCARD_AVAILABLE and SD_PINS_AVAILABLE else 'Not Available'}
-WiFi/NTP: {'Available' if NTP_AVAILABLE else 'Not Available'}
-Display Brightness: {int(settings.get('DISPLAY_BRIGHTNESS', DEFAULT_BRIGHTNESS) * 100)}%
-
-Settings:
-{chr(10).join([f'  {k}: {v}' for k, v in settings.items()])}
-================================
-"""
+        # Build log entry without complex f-string
+        log_entry = "\nBoot Log Entry - " + str(timestamp) + "\n"
+        log_entry += "================================\n"
+        log_entry += "Boot System Version: " + __version__ + "\n"
+        log_entry += "Reset Cause: " + reset_desc + "\n"
+        log_entry += "Recovery Mode: " + str(read_nvm_flag(RECOVERY_FLAG_ADDR)) + "\n"
+        log_entry += "Developer Mode: " + str(read_nvm_flag(DEVELOPER_MODE_FLAG_ADDR)) + "\n"
+        log_entry += "Flash Write: " + str(read_nvm_flag(FLASH_WRITE_FLAG_ADDR)) + "\n"
+        log_entry += "Reload Count: " + str(read_nvm_byte(RELOAD_COUNTER_ADDR)) + "\n"
+        log_entry += "Memory Free: " + str(gc.mem_free()) + " bytes\n"
+        
+        sd_status = "Available" if SDCARD_AVAILABLE and SD_PINS_AVAILABLE else "Not Available"
+        log_entry += "SD Card: " + sd_status + "\n"
+        
+        wifi_status = "Available" if NTP_AVAILABLE else "Not Available"
+        log_entry += "WiFi/NTP: " + wifi_status + "\n"
+        
+        brightness_pct = int(settings.get('DISPLAY_BRIGHTNESS', DEFAULT_BRIGHTNESS) * 100)
+        log_entry += "Display Brightness: " + str(brightness_pct) + "%\n\n"
+        
+        log_entry += "Settings:\n"
+        for k, v in settings.items():
+            log_entry += "  " + str(k) + ": " + str(v) + "\n"
+        log_entry += "================================\n"
         
         with open("/logs/boot.log", "a") as f:
             f.write(log_entry)
@@ -985,8 +991,9 @@ Settings:
         return True
         
     except Exception as e:
-        print(f"Boot log creation failed: {e}")
+        print("Boot log creation failed: " + str(e))
         return False
+
 
 # --- Debug and Testing Functions ---
 def test_boot_components():
