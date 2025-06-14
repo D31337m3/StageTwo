@@ -31,6 +31,44 @@ SCREEN_HEIGHT = board.DISPLAY.height
 STATUS_BAR_HEIGHT = 20
 MENU_START_Y = STATUS_BAR_HEIGHT + 10
 
+def load_settings():
+    """Load settings from settings.toml"""
+    settings = {}
+    try:
+        with open("/settings.toml", "r") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    
+                    # Convert numeric values
+                    if value.isdigit():
+                        value = int(value)
+                    elif value.lower() in ("true", "false"):
+                        value = value.lower() == "true"
+                    
+                    settings[key] = value
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+    return settings
+
+def save_settings(settings):
+    """Save settings to settings.toml"""
+    try:
+        with open("/settings.toml", "w") as f:
+            for key, value in settings.items():
+                if isinstance(value, bool):
+                    f.write(f"{key} = {str(value).lower()}\n")
+                elif isinstance(value, int):
+                    f.write(f"{key} = {value}\n")
+                else:
+                    f.write(f'{key} = "{value}"\n')
+    except Exception as e:
+        print(f"Error saving settings: {e}")
+
+
 class StatusBar:
     def __init__(self, display_group):
         self.group = displayio.Group()
@@ -180,12 +218,65 @@ class AppLoader:
         self.apps = []
         self.selected = 0
         
+        # Load screensaver settings
+        self.settings = load_settings()
+        self.screensaver_timeout = self.settings.get("SCREENSAVER_TIMEOUT", 60)  # 60s default
+        self.screensaver_enabled = self.settings.get("SCREENSAVER_ENABLED", True)
+        self.screensaver_type = self.settings.get("SCREENSAVER_TYPE", "trippy")  # "trippy" or "constellation"
+        
+        # Screensaver timing
+        self.last_activity_time = time.monotonic()
+        self.screensaver_active = False
+        
         # Ensure system directory exists
         self._ensure_system_dir()
         
         # Discover and load apps
         self._discover_apps()
         self._load_apps_config()
+
+    def _check_screensaver_timeout(self):
+        """Check if screensaver should activate"""
+        if not self.screensaver_enabled:
+            return False
+        
+        current_time = time.monotonic()
+        if current_time - self.last_activity_time >= self.screensaver_timeout:
+            return True
+        return False
+    
+    def _reset_screensaver_timer(self):
+        """Reset screensaver timer on user activity"""
+        self.last_activity_time = time.monotonic()
+    
+    def _start_screensaver(self):
+        """Start the appropriate screensaver"""
+        self.screensaver_active = True
+        
+        def return_to_app_loader():
+            """Return from screensaver to app loader"""
+            self.screensaver_active = False
+            self._reset_screensaver_timer()
+            self.draw_menu()
+        
+        try:
+            if self.screensaver_type == "constellation":
+                # Try to import constellation screensaver
+                try:
+                    from system.screensaver import start_screensaver_night_mode
+                    start_screensaver_night_mode(return_to_app_loader)
+                except ImportError:
+                    print("Constellation screensaver not available, using trippy")
+                    from system.trippy_screensaver import start_screensaver
+                    start_screensaver(return_to_app_loader)
+            else:  # Default to trippy
+                from system.trippy_screensaver import start_screensaver
+                start_screensaver(return_to_app_loader)
+                
+        except Exception as e:
+            print(f"Screensaver error: {e}")
+            self.screensaver_active = False
+            self._reset_screensaver_timer()
 
     def _is_developer_mode(self):
         """Check if developer mode is enabled via NVM flag"""
@@ -597,6 +688,7 @@ class AppLoader:
             "Refresh Apps",
             "Toggle App Status",
             "View App Details", 
+            "Screensaver Settings",
             "System Info",
             "Back to Main Menu"
         ]
@@ -649,13 +741,127 @@ class AppLoader:
                     self._toggle_app_status()
                 elif settings_selected == 2:  # View App Details
                     self._view_app_details_menu()
-                elif settings_selected == 3:  # System Info
+                elif settings_selected == 3:  # Screensaver Settings
+                    self._show_screensaver_settings()
+                elif settings_selected == 4:  # System Info
                     self._show_system_info()
-                elif settings_selected == 4:  # Back
+                elif settings_selected == 5:  # Back
                     break
                     
             elif press_duration > 0.05:  # Short press - navigate
                 settings_selected = (settings_selected + 1) % len(settings_options)
+            
+            # Reset screensaver timer on any activity
+            self._reset_screensaver_timer()
+
+
+    def _show_screensaver_settings(self):
+        """Show screensaver configuration"""
+        screensaver_options = [
+            f"Enabled: {'Yes' if self.screensaver_enabled else 'No'}",
+            f"Timeout: {self.screensaver_timeout//60}min {self.screensaver_timeout%60}s",
+            f"Type: {self.screensaver_type.title()}",
+            "Test Screensaver",
+            "Back"
+        ]
+        
+        screensaver_selected = 0
+        
+        while True:
+            # Clear main group but keep status bar
+            while len(self.main_group) > 1:
+                self.main_group.pop()
+            
+            self.status_bar.update_all()
+            
+            screensaver_group = displayio.Group()
+            
+            # Title
+            title = label.Label(
+                terminalio.FONT,
+                text="Screensaver Settings",
+                color=0xFF8000,
+                x=10,
+                y=MENU_START_Y + 10
+            )
+            screensaver_group.append(title)
+            
+            # Update options with current values
+            screensaver_options[0] = f"Enabled: {'Yes' if self.screensaver_enabled else 'No'}"
+            screensaver_options[1] = f"Timeout: {self.screensaver_timeout//60}min {self.screensaver_timeout%60}s"
+            screensaver_options[2] = f"Type: {self.screensaver_type.title()}"
+            
+            # Options
+            for i, option in enumerate(screensaver_options):
+                prefix = ">" if i == screensaver_selected else " "
+                color = 0x00FF00 if i == screensaver_selected else 0xFFFFFF
+                
+                option_label = label.Label(
+                    terminalio.FONT,
+                    text=f"{prefix} {option}",
+                    color=color,
+                    x=10,
+                    y=MENU_START_Y + 30 + i * 15
+                )
+                screensaver_group.append(option_label)
+            
+            # Help text
+            help_label = label.Label(
+                terminalio.FONT,
+                text="Long: Select  Short: Next",
+                color=0x888888,
+                x=10,
+                y=self.screen_height - 20
+            )
+            screensaver_group.append(help_label)
+            
+            self.main_group.append(screensaver_group)
+            self.display.root_group = self.main_group
+            
+            # Handle input
+            press_duration = self._handle_button_input()
+            
+            if press_duration > 1.0:  # Long press - select option
+                if screensaver_selected == 0:  # Toggle enabled
+                    self.screensaver_enabled = not self.screensaver_enabled
+                    self.settings["SCREENSAVER_ENABLED"] = self.screensaver_enabled
+                    save_settings(self.settings)
+                    
+                elif screensaver_selected == 1:  # Change timeout
+                    timeouts = [60, 120, 300, 600, 900, 1800]  # 1min, 2min, 5min, 10min, 15min, 30min
+                    current_index = 0
+                    for i, timeout in enumerate(timeouts):
+                        if timeout >= self.screensaver_timeout:
+                            current_index = i
+                            break
+                    
+                    next_index = (current_index + 1) % len(timeouts)
+                    self.screensaver_timeout = timeouts[next_index]
+                    self.settings["SCREENSAVER_TIMEOUT"] = self.screensaver_timeout
+                    save_settings(self.settings)
+                    
+                elif screensaver_selected == 2:  # Change type
+                    types = ["trippy", "constellation"]
+                    current_index = types.index(self.screensaver_type) if self.screensaver_type in types else 0
+                    next_index = (current_index + 1) % len(types)
+                    self.screensaver_type = types[next_index]
+                    self.settings["SCREENSAVER_TYPE"] = self.screensaver_type
+                    save_settings(self.settings)
+                    
+                elif screensaver_selected == 3:  # Test screensaver
+                    self.show_message("Starting screensaver test...", color=0x00FFFF, duration=1)
+                    self._start_screensaver()
+                    
+                elif screensaver_selected == 4:  # Back
+                    break
+                    
+            elif press_duration > 0.05:  # Short press - navigate
+                screensaver_selected = (screensaver_selected + 1) % len(screensaver_options)
+            
+            # Reset screensaver timer on any activity
+            self._reset_screensaver_timer()
+
+
 
     def _toggle_app_status(self):
         """Toggle enabled/disabled status of apps"""
@@ -810,6 +1016,16 @@ class AppLoader:
         
         while True:
             try:
+                # Check for screensaver timeout
+                if self._check_screensaver_timeout() and not self.screensaver_active:
+                    self._start_screensaver()
+                    continue  # Skip other processing while screensaver is active
+                
+                # Skip input handling if screensaver is active
+                if self.screensaver_active:
+                    time.sleep(0.1)
+                    continue
+                
                 # Update status bar periodically
                 if time.monotonic() - last_status_update > 5:
                     self.status_bar.update_all()
@@ -817,6 +1033,9 @@ class AppLoader:
                 
                 if self.has_button:
                     press_duration = self._handle_button_input()
+                    
+                    if press_duration > 0:  # Any button press resets screensaver timer
+                        self._reset_screensaver_timer()
                     
                     if press_duration > 3.0:  # Very long press - settings menu
                         self.show_settings_menu()
@@ -842,6 +1061,29 @@ class AppLoader:
                 print(f"Error in main loop: {e}")
                 self.show_message(f"System Error:\n{str(e)}", color=0xFF0000, duration=3)
                 self.draw_menu()
+                self._reset_screensaver_timer()  # Reset on error too
+
+    # Update the _handle_button_input method to reset screensaver timer
+    def _handle_button_input(self):
+        """Handle button input and return press duration"""
+        if not self.has_button:
+            time.sleep(0.1)
+            return 0
+            
+        # Wait for button press
+        while self.button.value:
+            time.sleep(0.01)
+        
+        # Reset screensaver timer on button press
+        self._reset_screensaver_timer()
+        
+        # Measure press duration
+        press_start = time.monotonic()
+        while not self.button.value:
+            time.sleep(0.01)
+        
+        return time.monotonic() - press_start
+
 
 def main():
     """Main entry point"""
