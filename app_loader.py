@@ -2,42 +2,34 @@ import board
 import displayio
 import terminalio
 from adafruit_display_text import label
+import time
+import os
 import digitalio
 import supervisor
-import time
-import rtc
-import wifi
-import os
-import gc
+import sys
+import io
+import traceback
 import json
-import microcontroller
-# Try to import BLE if available
+import gc
+
+# Try to import WiFi and BLE modules
+try:
+    import wifi
+    WIFI_AVAILABLE = True
+except ImportError:
+    WIFI_AVAILABLE = False
+
 try:
     import _bleio
     BLE_AVAILABLE = True
 except ImportError:
     BLE_AVAILABLE = False
 
-# Status bar constants
-STATUS_BAR_HEIGHT = 15
+# Display constants
 SCREEN_WIDTH = board.DISPLAY.width
 SCREEN_HEIGHT = board.DISPLAY.height
+STATUS_BAR_HEIGHT = 20
 MENU_START_Y = STATUS_BAR_HEIGHT + 10
- 
-# App configuration
-APPS_CONFIG_FILE = "/system/apps.json"
-
-# Default apps if config file doesn't exist
-DEFAULT_APPS = [
-    {"name": "Serial Monitor", "file": "/system/serialmon_esp32.py", "description": "Seriar/Uart Monitor"},
-    {"name": "File Manager", "file": "/filemgr.py", "description": "Browse and manage files"},
-    {"name": "Network Tools", "file": "/wifi_config.py", "description": "WiFi and network utilities"},
-    {"name": "Settings", "file": "/settings.py", "description": "System configuration"},
-    {"name": "Terminal", "file": "/terminal.py", "description": "Command line interface"},
-    {"name": "Recovery Mode", "file": "/recovery.py", "description": "System recovery tools"},
-    {"name": "Boot Menu", "file": "/bootmenu.py", "description": "Boot options menu"},
-    {"name": "Reboot System", "file": "REBOOT", "description": "Restart the device"},
-]
 
 class StatusBar:
     def __init__(self, display_group):
@@ -53,55 +45,55 @@ class StatusBar:
         
         # WiFi status icon (left side)
         self.wifi_label = label.Label(
-            terminalio.FONT, text="", color=0x00FF00, x=5, y=6
+            terminalio.FONT, text="", color=0x00FF00, x=5, y=12
         )
         self.group.append(self.wifi_label)
         
         # BLE status icon (left side, next to WiFi)
         self.ble_label = label.Label(
-            terminalio.FONT, text="", color=0x0080FF, x=25, y=6
+            terminalio.FONT, text="", color=0x0080FF, x=45, y=12
         )
         self.group.append(self.ble_label)
         
         # System status (center-left)
         self.status_label = label.Label(
-            terminalio.FONT, text="Ready", color=0xFFFFFF, x=50, y=6
+            terminalio.FONT, text="Ready", color=0xFFFFFF, x=80, y=12
         )
         self.group.append(self.status_label)
         
         # Time display (right side)
         self.time_label = label.Label(
-            terminalio.FONT, text="--:--", color=0xFFFF00, x=SCREEN_WIDTH - 50, y=6
+            terminalio.FONT, text="--:-- --", color=0xFFFF00, x=SCREEN_WIDTH - 70, y=12
         )
         self.group.append(self.time_label)
-        
-        # Memory usage (far right)
-        self.memory_label = label.Label(
-            terminalio.FONT, text="", color=0xFF8000, x=SCREEN_WIDTH - 80, y=6
-        )
-        self.group.append(self.memory_label)
         
         self.display_group.append(self.group)
         
     def update_wifi_status(self):
-        """Update WiFi status icon"""
+        """Update WiFi status icon with signal quality"""
+        if not WIFI_AVAILABLE:
+            self.wifi_label.text = ""
+            return
+            
         try:
             if wifi.radio.connected:
                 # Show signal strength with different colors
                 rssi = wifi.radio.ap_info.rssi if wifi.radio.ap_info else -100
                 if rssi > -50:
-                    self.wifi_label.text = "WiFi"
+                    self.wifi_label.text = "WiFi+"
                     self.wifi_label.color = 0x00FF00  # Green - excellent
                 elif rssi > -70:
                     self.wifi_label.text = "WiFi"
                     self.wifi_label.color = 0xFFFF00  # Yellow - good
                 else:
-                    self.wifi_label.text = "WiFi"
+                    self.wifi_label.text = "WiFi-"
                     self.wifi_label.color = 0xFF8000  # Orange - weak
             else:
-                self.wifi_label.text = ""
-        except:
-            self.wifi_label.text = ""
+                self.wifi_label.text = "WiFi?"
+                self.wifi_label.color = 0xFF0000  # Red - disconnected
+        except Exception:
+            self.wifi_label.text = "WiFi?"
+            self.wifi_label.color = 0xFF0000
             
     def update_ble_status(self):
         """Update BLE status icon"""
@@ -113,55 +105,49 @@ class StatusBar:
             # Check if BLE is enabled/active
             if _bleio.adapter.enabled:
                 if _bleio.adapter.connected:
-                    self.ble_label.text = "BLE"
+                    self.ble_label.text = "BLE+"
                     self.ble_label.color = 0x00FF00  # Green - connected
                 else:
                     self.ble_label.text = "BLE"
                     self.ble_label.color = 0x0080FF  # Blue - advertising/available
             else:
-                self.ble_label.text = ""
-        except:
+                self.ble_label.text = "BLE-"
+                self.ble_label.color = 0x888888  # Gray - disabled
+        except Exception:
             self.ble_label.text = ""
             
     def update_time(self):
-        """Update time display"""
+        """Update time display in 12-hour format"""
         try:
             current_time = time.localtime()
-            time_str = f"{current_time.tm_hour:02d}:{current_time.tm_min:02d}"
+            hour = current_time.tm_hour
+            minute = current_time.tm_min
+            
+            # Convert to 12-hour format
+            if hour == 0:
+                hour_12 = 12
+                am_pm = "AM"
+            elif hour < 12:
+                hour_12 = hour
+                am_pm = "AM"
+            elif hour == 12:
+                hour_12 = 12
+                am_pm = "PM"
+            else:
+                hour_12 = hour - 12
+                am_pm = "PM"
+                
+            time_str = f"{hour_12:2d}:{minute:02d} {am_pm}"
             self.time_label.text = time_str
             
             # Adjust position based on text width
             self.time_label.x = SCREEN_WIDTH - len(time_str) * 6 - 5
-        except:
-            self.time_label.text = "--:--"
-            
-    def update_memory(self):
-        """Update memory usage display"""
-        try:
-            gc.collect()
-            free_mem = gc.mem_free()
-            if free_mem < 1024:
-                mem_text = f"{free_mem}B"
-                color = 0xFF0000  # Red - low memory
-            elif free_mem < 10240:
-                mem_text = f"{free_mem//1024}K"
-                color = 0xFF8000  # Orange - medium memory
-            else:
-                mem_text = f"{free_mem//1024}K"
-                color = 0x00FF00  # Green - good memory
-                
-            self.memory_label.text = mem_text
-            self.memory_label.color = color
-            
-            # Adjust position
-            self.memory_label.x = SCREEN_WIDTH - len(mem_text) * 6 - 5
-            self.time_label.x = self.memory_label.x - 35
-        except:
-            self.memory_label.text = ""
+        except Exception:
+            self.time_label.text = "--:-- --"
             
     def set_status(self, status_text, color=0xFFFFFF):
         """Set the status message"""
-        self.status_label.text = status_text[:15]  # Limit length
+        self.status_label.text = status_text[:20]  # Limit length
         self.status_label.color = color
         
     def update_all(self):
@@ -169,285 +155,722 @@ class StatusBar:
         self.update_wifi_status()
         self.update_ble_status()
         self.update_time()
-        self.update_memory()
 
 class AppLoader:
     def __init__(self):
         self.display = board.DISPLAY
-        self.main_group = displayio.Group()
-        self.display.root_group = self.main_group
+        self.screen_width = self.display.width
+        self.screen_height = self.display.height
         
-        # Initialize status bar
-        self.status_bar = StatusBar(self.main_group)
-        
-        # Setup button if available
+        # Initialize button if available
         try:
             self.button = digitalio.DigitalInOut(board.BUTTON)
-            self.button.direction = digitalio.Direction.INPUT
-            self.button.pull = digitalio.Pull.UP
+            self.button.switch_to_input(pull=digitalio.Pull.UP)
             self.has_button = True
-        except:
+        except Exception:
             self.has_button = False
-            
-        # Menu state
+            print("No button available - console only mode")
+        
+        # Initialize status bar
+        self.main_group = displayio.Group()
+        self.status_bar = StatusBar(self.main_group)
+        
+        # Load apps configuration
+        self.apps_config_path = "/system/apps.json"
+        self.apps = []
         self.selected = 0
-        self.apps = self.load_apps()
-        self.menu_group = displayio.Group()
-        self.main_group.append(self.menu_group)
         
-        # Last update time for status bar
-        self.last_status_update = 0
-        self.status_update_interval = 1.0  # Update every second
+        # Ensure system directory exists
+        self._ensure_system_dir()
         
-    def load_apps(self):
-        """Load app configuration from file or use defaults"""
+        # Discover and load apps
+        self._discover_apps()
+        self._load_apps_config()
+
+    def _is_developer_mode(self):
+        """Check if developer mode is enabled via NVM flag"""
         try:
-            with open(APPS_CONFIG_FILE, 'r') as f:
-                apps = json.load(f)
-                self.status_bar.set_status("Apps loaded", 0x00FF00)
-                return apps
-        except:
-            self.status_bar.set_status("Using defaults", 0xFFFF00)
-            self.save_apps(DEFAULT_APPS)
-            return DEFAULT_APPS
-            
-    def save_apps(self, apps):
-        """Save app configuration to file"""
-        try:
-            # Ensure system directory exists
-            try:
-                os.mkdir("/system")
-            except OSError:
-                pass
-                
-            with open(APPS_CONFIG_FILE, 'w') as f:
-                json.dump(apps, f)
+            import microcontroller
+            # Read the developer mode flag from NVM
+            nvm_data = microcontroller.nvm
+            if len(nvm_data) > 1:  # DEVELOPER_MODE_FLAG_ADDR = 1
+                return bool(nvm_data[1])  # Check byte at address 1
+            return False
         except Exception as e:
-            print(f"Failed to save apps config: {e}")
+            print(f"Error checking developer mode: {e}")
+            return False  # Default to non-developer mode if we can't read NVM
+
+    
+    def _ensure_system_dir(self):
+        """Ensure /system directory exists"""
+        try:
+            os.mkdir("/system")
+        except OSError:
+            pass  # Directory already exists or other error
+
+
+    def _discover_apps(self):
+        """Discover apps in /apps directories on flash and SD"""
+        discovered_apps = []
+        
+        # Search locations
+        search_paths = ["/apps"]
+        
+        # Check for SD card mount (common mount points)
+        sd_paths = ["/sd/apps", "/mnt/sd/apps", "/external/apps"]
+        for sd_path in sd_paths:
+            try:
+                if os.path.exists(sd_path):
+                    search_paths.append(sd_path)
+            except Exception:
+                continue
+        
+        # Discover apps in each path
+        for search_path in search_paths:
+            try:
+                if os.path.exists(search_path):
+                    self._scan_directory_for_apps(search_path, discovered_apps)
+            except Exception as e:
+                print(f"Error scanning {search_path}: {e}")
+        
+        # Check developer mode before scanning root directory
+        if self._is_developer_mode():
+            # Also check root directory for standalone apps
+            try:
+                root_files = os.listdir("/")
+                for filename in root_files:
+                    if (filename.endswith(".py") and 
+                        filename not in ("code.py", "boot.py", "app_loader.py") and
+                        not filename.startswith(".")):
+                        
+                        app_info = {
+                            "name": filename[:-3],  # Remove .py extension
+                            "path": "/" + filename,
+                            "description": f"Standalone app: {filename}",
+                            "enabled": True,
+                            "location": "root"
+                        }
+                        discovered_apps.append(app_info)
+            except Exception as e:
+                print(f"Error scanning root: {e}")
+        
+        self.discovered_apps = discovered_apps
+        print(f"Discovered {len(discovered_apps)} apps")
+
+
+    def _scan_directory_for_apps(self, directory, apps_list):
+        """Scan a directory for Python apps"""
+        try:
+            items = os.listdir(directory)
+            for item in items:
+                item_path = directory + "/" + item
+                
+                if item.endswith(".py"):
+                    # Single Python file app
+                    app_info = {
+                        "name": item[:-3],  # Remove .py extension
+                        "path": item_path,
+                        "description": f"App from {directory}",
+                        "enabled": True,
+                        "location": directory
+                    }
+                    apps_list.append(app_info)
+                    
+                elif self._is_directory(item_path):
+                    # Directory-based app (look for main.py or app.py)
+                    main_files = ["main.py", "app.py", item + ".py"]
+                    for main_file in main_files:
+                        main_path = item_path + "/" + main_file
+                        if self._file_exists(main_path):
+                            app_info = {
+                                "name": item,
+                                "path": main_path,
+                                "description": f"Directory app: {item}",
+                                "enabled": True,
+                                "location": directory
+                            }
+                            apps_list.append(app_info)
+                            break
+                            
+        except Exception as e:
+            print(f"Error scanning {directory}: {e}")
+
+    def _is_directory(self, path):
+        """Check if path is a directory"""
+        try:
+            stat = os.stat(path)
+            return bool(stat[0] & 0x4000)
+        except Exception:
+            return False
+
+    def _file_exists(self, path):
+        """Check if file exists"""
+        try:
+            os.stat(path)
+            return True
+        except Exception:
+            return False
+
+    def _load_apps_config(self):
+        """Load apps configuration from JSON file"""
+        try:
+            with open(self.apps_config_path, "r") as f:
+                config = json.load(f)
+                saved_apps = config.get("apps", [])
+                
+            # Merge discovered apps with saved configuration
+            self.apps = []
             
+            # First, add apps from config that still exist
+            for saved_app in saved_apps:
+                if self._file_exists(saved_app["path"]):
+                    self.apps.append(saved_app)
+            
+            # Then add newly discovered apps not in config
+            for discovered_app in self.discovered_apps:
+                if not any(app["path"] == discovered_app["path"] for app in self.apps):
+                    self.apps.append(discovered_app)
+            
+            # Save updated configuration
+            self._save_apps_config()
+            
+        except Exception as e:
+            print(f"Error loading apps config: {e}")
+            # Use discovered apps as fallback
+            self.apps = self.discovered_apps
+            self._save_apps_config()
+
+    def _save_apps_config(self):
+        """Save apps configuration to JSON file"""
+        try:
+            config = {
+                "apps": self.apps,
+                "last_updated": time.time()
+            }
+            with open(self.apps_config_path, "w") as f:
+                json.dump(config, f)
+        except Exception as e:
+            print(f"Error saving apps config: {e}")
+
     def draw_menu(self):
-        """Draw the application menu"""
-        # Clear existing menu
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
-            
+        """Draw the main menu with status bar"""
+        # Clear main group but keep status bar
+        while len(self.main_group) > 1:
+            self.main_group.pop()
+        
+        # Update status bar
+        self.status_bar.update_all()
+        
+        # Create menu group
+        menu_group = displayio.Group()
+        
         # Title
         title = label.Label(
-            terminalio.FONT, text="Application Menu:", color=0x00FFFF, 
-            x=10, y=MENU_START_Y + 8, scale=1
+            terminalio.FONT, 
+            text="App Loader", 
+            color=0x00FFFF, 
+            x=10, 
+            y=MENU_START_Y + 10
         )
-        self.menu_group.append(title)
-        
-        # Calculate visible items (account for screen size)
-        visible_items = min(8, (SCREEN_HEIGHT - MENU_START_Y - 40) // 20)
-        start_index = max(0, self.selected - visible_items // 2)
-        end_index = min(len(self.apps), start_index + visible_items)
-        
-        # Adjust start_index if we're near the end
-        if end_index - start_index < visible_items:
-            start_index = max(0, end_index - visible_items)
+        menu_group.append(title)
+
+        if not self.apps:
+            no_apps_label = label.Label(
+                terminalio.FONT, 
+                text="No apps found.", 
+                color=0xFF0000, 
+                x=10, 
+                y=MENU_START_Y + 30
+            )
+            menu_group.append(no_apps_label)
+        else:
+            # Calculate visible apps
+            menu_height = self.screen_height - MENU_START_Y - 40
+            max_visible = menu_height // 15
+            start_idx = max(0, self.selected - max_visible // 2)
+            end_idx = min(len(self.apps), start_idx + max_visible)
             
-        # Draw menu items
-        for i in range(start_index, end_index):
-            app = self.apps[i]
-            y_pos = MENU_START_Y + 35 + (i - start_index) * 20
+            if end_idx - start_idx < max_visible and len(self.apps) > max_visible:
+                start_idx = max(0, end_idx - max_visible)
             
-            # Highlight selected item
-            if i == self.selected:
-                # Create highlight background
-                highlight_bitmap = displayio.Bitmap(SCREEN_WIDTH - 20, 18, 1)
-                highlight_palette = displayio.Palette(1)
-                highlight_palette[0] = 0x003366  # Dark blue highlight
-                highlight_sprite = displayio.TileGrid(
-                    highlight_bitmap, pixel_shader=highlight_palette, 
-                    x=10, y=y_pos - 12
+            # Display apps
+            enabled_apps = [app for app in self.apps if app.get("enabled", True)]
+            
+            for i in range(start_idx, end_idx):
+                if i < len(enabled_apps):
+                    app = enabled_apps[i]
+                    prefix = ">" if i == self.selected else " "
+                    color = 0x00FF00 if i == self.selected else 0xFFFFFF
+                    
+                    # Truncate long names
+                    display_name = app["name"]
+                    if len(display_name) > 25:
+                        display_name = display_name[:22] + "..."
+                    
+                    app_label = label.Label(
+                        terminalio.FONT,
+                        text=f"{prefix} {display_name}",
+                        color=color,
+                        x=10,
+                        y=MENU_START_Y + 30 + (i - start_idx) * 15
+                    )
+                    menu_group.append(app_label)
+            
+            # Navigation help
+            help_text = "Short: Next  Long: Run  Hold: Menu"
+            help_label = label.Label(
+                terminalio.FONT,
+                text=help_text,
+                color=0x888888,
+                x=10,
+                y=self.screen_height - 30
+            )
+            menu_group.append(help_label)
+            
+            # Position indicator
+            pos_text = f"{self.selected+1}/{len(enabled_apps)}"
+            pos_label = label.Label
+            pos_label = label.Label(
+                terminalio.FONT,
+                text=pos_text,
+                color=0x888888,
+                x=self.screen_width - 60,
+                y=self.screen_height - 30
+            )
+            menu_group.append(pos_label)
+
+        self.main_group.append(menu_group)
+        self.display.root_group = self.main_group
+
+    def show_message(self, msg, color=0xFFFFFF, duration=None):
+        """Show a message on screen"""
+        # Clear main group but keep status bar
+        while len(self.main_group) > 1:
+            self.main_group.pop()
+        
+        # Update status bar
+        self.status_bar.update_all()
+        
+        message_group = displayio.Group()
+        lines = msg.split("\n")
+        
+        for i, line in enumerate(lines):
+            if line.strip():  # Skip empty lines
+                text_label = label.Label(
+                    terminalio.FONT, 
+                    text=line, 
+                    color=color, 
+                    x=10, 
+                    y=MENU_START_Y + 20 + i * 20
                 )
-                self.menu_group.append(highlight_sprite)
-                text_color = 0xFFFF00  # Yellow for selected
+                message_group.append(text_label)
+        
+        self.main_group.append(message_group)
+        self.display.root_group = self.main_group
+        
+        if duration:
+            time.sleep(duration)
+
+    def show_app_details(self, app):
+        """Show detailed information about an app"""
+        details = f"Name: {app['name']}\n"
+        details += f"Path: {app['path']}\n"
+        details += f"Location: {app.get('location', 'unknown')}\n"
+        details += f"Description: {app.get('description', 'No description')}\n\n"
+        details += "Long press to run\nShort press to return"
+        
+        self.show_message(details, color=0x00FFFF)
+
+    def run_app(self, app):
+        """Run the selected app"""
+        app_path = app["path"]
+        app_name = app["name"]
+        
+        self.status_bar.set_status(f"Loading {app_name}...", 0xFFFF00)
+        self.show_message(f"Starting {app_name}...", color=0x00FF00, duration=1)
+        
+        # Method 1: Try supervisor.set_next_code_file (preferred)
+        try:
+            if hasattr(supervisor, "set_next_code_file"):
+                supervisor.set_next_code_file(app_path)
+                time.sleep(0.1)
+                supervisor.reload()
+                return  # This should restart the system
+        except Exception as e:
+            print(f"set_next_code_file failed: {e}")
+            self.show_message(f"Reload method failed:\n{str(e)}", color=0xFF8000, duration=2)
+
+        # Method 2: Try to exec the file directly
+        try:
+            self.status_bar.set_status(f"Executing {app_name}...", 0xFF8000)
+            
+            # Save current working directory
+            original_cwd = os.getcwd() if hasattr(os, 'getcwd') else "/"
+            
+            # Change to app directory if it's a directory-based app
+            app_dir = "/".join(app_path.split("/")[:-1])
+            if app_dir and app_dir != "/":
+                try:
+                    os.chdir(app_dir)
+                except Exception:
+                    pass
+            
+            # Read and execute the app
+            with open(app_path, "r") as f:
+                app_code = f.read()
+            
+            # Create a clean namespace for the app
+            app_globals = {
+                "__name__": "__main__",
+                "__file__": app_path,
+            }
+            
+            # Redirect stdout/stderr to capture output
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            output_buffer = io.StringIO()
+            error_buffer = io.StringIO()
+            
+            sys.stdout = output_buffer
+            sys.stderr = error_buffer
+            
+            success = True
+            error_msg = ""
+            
+            try:
+                exec(app_code, app_globals)
+            except SystemExit:
+                # App called sys.exit(), this is normal
+                pass
+            except Exception as e:
+                success = False
+                error_msg = traceback.format_exc()
+            finally:
+                # Restore stdout/stderr
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+                
+                # Restore working directory
+                try:
+                    os.chdir(original_cwd)
+                except Exception:
+                    pass
+            
+            # Show results
+            output = output_buffer.getvalue()
+            errors = error_buffer.getvalue()
+            
+            if success:
+                if output:
+                    self.show_message(f"{app_name} output:\n{output[:200]}", color=0x00FF00)
+                else:
+                    self.show_message(f"{app_name} completed successfully", color=0x00FF00)
             else:
-                text_color = 0xFFFFFF  # White for normal
+                error_display = error_msg if error_msg else errors
+                self.show_message(f"Error in {app_name}:\n{error_display[:200]}", color=0xFF0000)
                 
-            # App name
-            app_label = label.Label(
-                terminalio.FONT, text=f"{i}: {app['name']}", 
-                color=text_color, x=15, y=y_pos
-            )
-            self.menu_group.append(app_label)
+        except Exception as e:
+            self.show_message(f"Failed to run {app_name}:\n{str(e)}", color=0xFF0000)
+        
+        # Wait for user input before returning to menu
+        self.status_bar.set_status("Press button to continue", 0x888888)
+        self._wait_for_button_release()
+        self._wait_for_button_press()
+        self.status_bar.set_status("Ready", 0xFFFFFF)
+
+    def refresh_apps(self):
+        """Refresh the apps list"""
+        self.status_bar.set_status("Refreshing apps...", 0xFFFF00)
+        self.show_message("Scanning for apps...", color=0x00FFFF, duration=1)
+        
+        self._discover_apps()
+        self._load_apps_config()
+        self.selected = 0
+        
+        self.status_bar.set_status("Apps refreshed", 0x00FF00)
+        time.sleep(1)
+        self.status_bar.set_status("Ready", 0xFFFFFF)
+
+    def show_settings_menu(self):
+        """Show settings/management menu"""
+        settings_options = [
+            "Refresh Apps",
+            "Toggle App Status",
+            "View App Details", 
+            "System Info",
+            "Back to Main Menu"
+        ]
+        
+        settings_selected = 0
+        
+        while True:
+            # Clear main group but keep status bar
+            while len(self.main_group) > 1:
+                self.main_group.pop()
             
-            # App description (smaller, dimmer)
-            if i == self.selected and 'description' in app:
-                desc_text = app['description'][:40]  # Limit description length
-                desc_label = label.Label(
-                    terminalio.FONT, text=desc_text, 
-                    color=0x888888, x=15, y=y_pos + 12
+            self.status_bar.update_all()
+            
+            settings_group = displayio.Group()
+            
+            # Title
+            title = label.Label(
+                terminalio.FONT,
+                text="Settings",
+                color=0xFF8000,
+                x=10,
+                y=MENU_START_Y + 10
+            )
+            settings_group.append(title)
+            
+            # Options
+            for i, option in enumerate(settings_options):
+                prefix = ">" if i == settings_selected else " "
+                color = 0x00FF00 if i == settings_selected else 0xFFFFFF
+                
+                option_label = label.Label(
+                    terminalio.FONT,
+                    text=f"{prefix} {option}",
+                    color=color,
+                    x=10,
+                    y=MENU_START_Y + 30 + i * 15
                 )
-                self.menu_group.append(desc_label)
-                
-        # Scroll indicators
-        if start_index > 0:
-            up_arrow = label.Label(
-                terminalio.FONT, text="^ More above", 
-                color=0x888888, x=SCREEN_WIDTH - 80, y=MENU_START_Y + 35
-            )
-            self.menu_group.append(up_arrow)
+                settings_group.append(option_label)
             
-        if end_index < len(self.apps):
-            down_arrow = label.Label(
-                terminalio.FONT, text="v More below", 
-                color=0x888888, x=SCREEN_WIDTH - 80, y=SCREEN_HEIGHT - 20
-            )
-            self.menu_group.append(down_arrow)
+            self.main_group.append(settings_group)
+            self.display.root_group = self.main_group
             
-        # Instructions
-        instructions = label.Label(
-            terminalio.FONT, text="Use buttons or console (up/dn/itm #)", 
-            color=0x00FF00, x=10, y=SCREEN_HEIGHT - 10
-        )
-        self.menu_group.append(instructions)
-        
-    def show_loading(self, app_name):
-        """Show loading screen"""
-        # Clear menu
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
+            # Handle input
+            press_duration = self._handle_button_input()
             
-        loading_group = displayio.Group()
-        
-        # Loading message
-        loading_label = label.Label(
-            terminalio.FONT, text=f"Loading: {app_name}", 
-            color=0xFFFF00, x=10, y=SCREEN_HEIGHT // 2, scale=1
-        )
-        loading_group.append(loading_label)
-        
-        # Progress animation
-        progress_label = label.Label(
-            terminalio.FONT, text="Please wait...", 
-            color=0xFFFFFF, x=10, y=SCREEN_HEIGHT // 2 + 30
-        )
-        loading_group.append(progress_label)
-        
-        self.menu_group.append(loading_group)
-        
-        # Animate loading
-        for i in range(3):
-            progress_label.text = "Loading" + "." * (i + 1)
-            time.sleep(0.3)
-            
-    def run_app(self, app_index):
-        """Execute selected application"""
-        if app_index >= len(self.apps):
+            if press_duration > 1.0:  # Long press - select option
+                if settings_selected == 0:  # Refresh Apps
+                    self.refresh_apps()
+                elif settings_selected == 1:  # Toggle App Status
+                    self._toggle_app_status()
+                elif settings_selected == 2:  # View App Details
+                    self._view_app_details_menu()
+                elif settings_selected == 3:  # System Info
+                    self._show_system_info()
+                elif settings_selected == 4:  # Back
+                    break
+                    
+            elif press_duration > 0.05:  # Short press - navigate
+                settings_selected = (settings_selected + 1) % len(settings_options)
+
+    def _toggle_app_status(self):
+        """Toggle enabled/disabled status of apps"""
+        if not self.apps:
+            self.show_message("No apps to configure", color=0xFF8000, duration=2)
             return
             
-        app = self.apps[app_index]
-        app_name = app['name']
-        app_file = app['file']
+        app_selected = 0
         
-        self.status_bar.set_status(f"Loading {app_name}", 0xFFFF00)
-        self.show_loading(app_name)
-        
-        try:
-            if app_file == "REBOOT":
-                self.status_bar.set_status("Rebooting...", 0xFF0000)
-                time.sleep(1)
-                microcontroller.reset()
+        while True:
+            # Show app list with status
+            while len(self.main_group) > 1:
+                self.main_group.pop()
+            
+            self.status_bar.update_all()
+            toggle_group = displayio.Group()
+            
+            title = label.Label(
+                terminalio.FONT,
+                text="Toggle App Status",
+                color=0xFF8000,
+                x=10,
+                y=MENU_START_Y + 10
+            )
+            toggle_group.append(title)
+            
+            for i, app in enumerate(self.apps[:10]):  # Show first 10 apps
+                prefix = ">" if i == app_selected else " "
+                status = "ON" if app.get("enabled", True) else "OFF"
+                color = 0x00FF00 if i == app_selected else (0xFFFFFF if app.get("enabled", True) else 0x888888)
                 
-            else:
-                # Check if file exists
-                try:
-                    with open(app_file, 'r') as f:
-                        pass  # Just check if file can be opened
-                except OSError:
-                    self.status_bar.set_status("App not found!", 0xFF0000)
-                    time.sleep(2)
-                    return
-                    
-                # Execute the application
-                if app_file.endswith('.py'):
-                    supervisor.set_next_code_file(app_file)
-                    supervisor.reload()
-                else:
-                    # Try to execute directly
-                    exec(open(app_file).read())
-                    
+                text = f"{prefix} {app['name'][:15]} [{status}]"
+                app_label = label.Label(
+                    terminalio.FONT,
+                    text=text,
+                    color=color,
+                    x=10,
+                    y=MENU_START_Y + 30 + i * 15
+                )
+                toggle_group.append(app_label)
+            
+            help_label = label.Label(
+                terminalio.FONT,
+                text="Long: Toggle  Short: Next  Hold: Exit",
+                color=0x888888,
+                x=10,
+                y=self.screen_height - 20
+            )
+            toggle_group.append(help_label)
+            
+            self.main_group.append(toggle_group)
+            self.display.root_group = self.main_group
+            
+            press_duration = self._handle_button_input()
+            
+            if press_duration > 2.0:  # Very long press - exit
+                break
+            elif press_duration > 1.0:  # Long press - toggle
+                if app_selected < len(self.apps):
+                    self.apps[app_selected]["enabled"] = not self.apps[app_selected].get("enabled", True)
+                    self._save_apps_config()
+            elif press_duration > 0.05:  # Short press - navigate
+                app_selected = (app_selected + 1) % min(len(self.apps), 10)
+
+    def _view_app_details_menu(self):
+        """Show detailed view of apps"""
+        if not self.apps:
+            self.show_message("No apps available", color=0xFF8000, duration=2)
+            return
+            
+        app_selected = 0
+        
+        while True:
+            if app_selected < len(self.apps):
+                self.show_app_details(self.apps[app_selected])
+            
+            press_duration = self._handle_button_input()
+            
+            if press_duration > 2.0:  # Very long press - exit
+                break
+            elif press_duration > 1.0:  # Long press - run app
+                if app_selected < len(self.apps):
+                    self.run_app(self.apps[app_selected])
+                    break
+            elif press_duration > 0.05:  # Short press - next app
+                app_selected = (app_selected + 1) % len(self.apps)
+
+    def _show_system_info(self):
+        """Show system information"""
+        try:
+            gc.collect()
+            free_mem = gc.mem_free()
+            total_apps = len(self.apps)
+            enabled_apps = len([app for app in self.apps if app.get("enabled", True)])
+            
+            info = f"System Information\n\n"
+            info += f"Free Memory: {free_mem} bytes\n"
+            info += f"Total Apps: {total_apps}\n"
+            info += f"Enabled Apps: {enabled_apps}\n"
+            info += f"WiFi: {'Available' if WIFI_AVAILABLE else 'Not Available'}\n"
+            info += f"BLE: {'Available' if BLE_AVAILABLE else 'Not Available'}\n"
+            info += f"Display: {self.screen_width}x{self.screen_height}\n\n"
+            info += "Press button to return"
+            
+            self.show_message(info, color=0x00FFFF)
+            self._wait_for_button_press()
+            
         except Exception as e:
-            self.status_bar.set_status(f"Error: {e}", 0xFF0000)
+            self.show_message(f"Error getting system info:\n{str(e)}", color=0xFF0000)
             time.sleep(2)
-        except:
-            time.sleep(2)
-            microcontroller.reset()
+
+    def _handle_button_input(self):
+        """Handle button input and return press duration"""
+        if not self.has_button:
+            time.sleep(0.1)
+            return 0
+            
+        # Wait for button press
+        while self.button.value:
+            time.sleep(0.01)
+        
+        # Measure press duration
+        press_start = time.monotonic()
+        while not self.button.value:
+            time.sleep(0.01)
+        
+        return time.monotonic() - press_start
+
+    def _wait_for_button_press(self):
+        """Wait for button press"""
+        if not self.has_button:
+            time.sleep(1)
+            return
+            
+        while self.button.value:
+            time.sleep(0.01)
+
+    def _wait_for_button_release(self):
+        """Wait for button release"""
+        if not self.has_button:
+            return
+            
+        while not self.button.value:
+            time.sleep(0.01)
 
     def main_loop(self):
-        """Main menu loop for app selection and launching"""
+        """Main application loop"""
+        self.status_bar.set_status("Ready")
         self.draw_menu()
-        last_button = self.button.value if self.has_button else True
-        prev_selected = self.selected
-        start_time = time.monotonic()
-        timeout = 30  # Optional: auto-exit after 30s inactivity
-
+        
+        last_status_update = time.monotonic()
+        
         while True:
-            # Update status bar every second
-            now = time.monotonic()
-            if now - self.last_status_update > self.status_update_interval:
-                self.status_bar.update_all()
-                self.last_status_update = now
-
-            input_received = False
-
-            # Serial/console input
-            if supervisor.runtime.serial_bytes_available:
-                try:
-                    cmd = input().strip().lower()
-                    input_received = True
-                    if cmd in ["up", "u"]:
-                        self.selected = (self.selected - 1) % len(self.apps)
-                    elif cmd in ["down", "d"]:
-                        self.selected = (self.selected + 1) % len(self.apps)
-                    elif cmd in ["select", "s", "enter"]:
-                        self.run_app(self.selected)
+            try:
+                # Update status bar periodically
+                if time.monotonic() - last_status_update > 5:
+                    self.status_bar.update_all()
+                    last_status_update = time.monotonic()
+                
+                if self.has_button:
+                    press_duration = self._handle_button_input()
+                    
+                    if press_duration > 3.0:  # Very long press - settings menu
+                        self.show_settings_menu()
                         self.draw_menu()
-                    elif cmd.isdigit() and 0 <= int(cmd) < len(self.apps):
-                        self.selected = int(cmd)
-                    else:
-                        print("Commands: up/down/select or 0-9")
-                except Exception as e:
-                    print(f"Input error: {e}")
-
-            # Button navigation
-            if self.has_button:
-                if not self.button.value and last_button:
-                    press_time = time.monotonic()
-                    while not self.button.value:
-                        if time.monotonic() - press_time > 1.0:
-                            # Long press: select
-                            self.run_app(self.selected)
+                    elif press_duration > 1.0:  # Long press - run app
+                        enabled_apps = [app for app in self.apps if app.get("enabled", True)]
+                        if enabled_apps and self.selected < len(enabled_apps):
+                            self.run_app(enabled_apps[self.selected])
                             self.draw_menu()
-                            break
-                        time.sleep(0.01)
-                    else:
-                        # Short press: next item
-                        self.selected = (self.selected + 1) % len(self.apps)
-                        input_received = True
-                last_button = self.button.value
-
-            # Redraw menu if selection changed
-            if self.selected != prev_selected:
-                self.draw_menu()
-                prev_selected = self.selected
-
-            # Reset inactivity timer on input
-            if input_received:
-                start_time = time.monotonic()
-
-            # Optional: auto-exit after timeout
-            if time.monotonic() - start_time > timeout:
-                self.status_bar.set_status("Timeout", 0xFF0000)
-                time.sleep(1)
+                    elif press_duration > 0.05:  # Short press - navigate
+                        enabled_apps = [app for app in self.apps if app.get("enabled", True)]
+                        if enabled_apps:
+                            self.selected = (self.selected + 1) % len(enabled_apps)
+                            self.draw_menu()
+                else:
+                    # Console mode - basic functionality
+                    time.sleep(0.1)
+                    
+            except KeyboardInterrupt:
+                print("App Loader interrupted")
                 break
+            except Exception as e:
+                print(f"Error in main loop: {e}")
+                self.show_message(f"System Error:\n{str(e)}", color=0xFF0000, duration=3)
+                self.draw_menu()
 
-            time.sleep(0.02)
+def main():
+    """Main entry point"""
+    try:
+        print("Starting App Loader...")
+        loader = AppLoader()
+        loader.main_loop()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        # Try to show error on display if possible
+        try:
+            display = board.DISPLAY
+            group = displayio.Group()
+            error_label = label.Label(
+                terminalio.FONT,
+                text=f"Fatal Error:\n{str(e)[:100]}",
+                color=0xFF0000,
+                x=10,
+                y=30
+            )
+            group.append(error_label)
+            display.root_group = group
+        except Exception:
+            pass
+        
+        # Keep system alive for debugging
+        while True:
+            time.sleep(1)
 
-# Entry point
 if __name__ == "__main__":
-    loader = AppLoader()
-    loader.main_loop()
+    main()
+

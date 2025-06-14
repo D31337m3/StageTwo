@@ -26,6 +26,7 @@ class StatusBar:
         )
         self.group.append(self.status_label)
         self.display_group.append(self.group)
+        
     def set_status(self, status_text, color=0xFFFFFF):
         self.status_label.text = status_text[:30]
         self.status_label.color = color
@@ -36,6 +37,7 @@ class FileManager:
         self.main_group = displayio.Group()
         self.display.root_group = self.main_group
         self.status_bar = StatusBar(self.main_group)
+        
         try:
             self.button = digitalio.DigitalInOut(board.BUTTON)
             self.button.direction = digitalio.Direction.INPUT
@@ -43,423 +45,524 @@ class FileManager:
             self.has_button = True
         except:
             self.has_button = False
-        self.menu_group = displayio.Group()
-        self.main_group.append(self.menu_group)
-        self.cwd = "/"
-        self.entries = []
-        self.selected = 0
-        self.mode = "browse"  # browse, action, input, warning
-        self.action = None
-        self.input_buffer = ""
-        self.last_status_update = 0
-        self.status_update_interval = 1.0
-        self.refresh_entries()
-
-    def refresh_entries(self):
+            print("No button available")
+        
+        self.current_path = "/"
+        self.selected_index = 0
+        self.files = []
+        self.running = True
+        
+    def _is_directory(self, path):
+        """Check if path is a directory"""
         try:
-            all_entries = sorted(os.listdir(self.cwd))
-            dirs = []
-            files = []
-            for entry in all_entries:
-                path = self.join(entry)
-                try:
-                    stat = os.stat(path)
-                    if stat[0] & 0x4000:
-                        dirs.append(entry)
-                    else:
-                        files.append(entry)
-                except:
-                    files.append(entry)
-            self.entries = [".."] + dirs + files
+            stat = os.stat(path)
+            return bool(stat[0] & 0x4000)
+        except Exception:
+            return False
+    
+    def _get_file_size(self, path):
+        """Get file size in bytes"""
+        try:
+            stat = os.stat(path)
+            return stat[6]  # Size is at index 6
+        except Exception:
+            return 0
+    
+    def _format_size(self, size):
+        """Format file size for display"""
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size//1024}K"
+        else:
+            return f"{size//(1024*1024)}M"
+    
+    def _scan_directory(self, path):
+        """Scan directory and return sorted file list"""
+        try:
+            items = os.listdir(path)
+            file_list = []
+            
+            # Add parent directory entry if not at root
+            if path != "/":
+                file_list.append({
+                    "name": "..",
+                    "path": "/".join(path.rstrip("/").split("/")[:-1]) or "/",
+                    "is_dir": True,
+                    "size": 0
+                })
+            
+            # Process items
+            for item in items:
+                if item.startswith("."):
+                    continue  # Skip hidden files
+                    
+                item_path = path.rstrip("/") + "/" + item
+                is_dir = self._is_directory(item_path)
+                size = 0 if is_dir else self._get_file_size(item_path)
+                
+                file_list.append({
+                    "name": item,
+                    "path": item_path,
+                    "is_dir": is_dir,
+                    "size": size
+                })
+            
+            # Sort: directories first, then files, both alphabetically
+            file_list.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+            return file_list
+            
         except Exception as e:
-            self.entries = [".."]
-            self.status_bar.set_status(f"Error: {e}", 0xFF0000)
-        self.selected = 0
-
-    def draw_menu(self):
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
+            print(f"Error scanning directory {path}: {e}")
+            return []
+    
+    def _draw_file_list(self):
+        """Draw the file browser interface"""
+        # Clear main group but keep status bar
+        while len(self.main_group) > 1:
+            self.main_group.pop()
+        
+        # Update status bar
+        self.status_bar.set_status(f"Path: {self.current_path}")
+        
+        # Create file list group
+        file_group = displayio.Group()
+        
+        # Title
         title = label.Label(
-            terminalio.FONT, text=f"File Manager: {self.cwd}", color=0x00FFFF,
-            x=10, y=MENU_START_Y + 8, scale=1
+            terminalio.FONT,
+            text="File Manager",
+            color=0x00FFFF,
+            x=10,
+            y=MENU_START_Y + 10
         )
-        self.menu_group.append(title)
-        visible_items = min(8, (SCREEN_HEIGHT - MENU_START_Y - 40) // 20)
-        total_items = len(self.entries)
-        if total_items <= visible_items:
-            start_index = 0
-            end_index = total_items
+        file_group.append(title)
+        
+        # Current path
+        path_label = label.Label(
+            terminalio.FONT,
+            text=f"Path: {self.current_path}",
+            color=0xFFFF00,
+            x=10,
+            y=MENU_START_Y + 25
+        )
+        file_group.append(path_label)
+        
+        # File list
+        if not self.files:
+            no_files_label = label.Label(
+                terminalio.FONT,
+                text="No files found",
+                color=0xFF0000,
+                x=10,
+                y=MENU_START_Y + 45
+            )
+            file_group.append(no_files_label)
         else:
-            if self.selected < visible_items // 2:
-                start_index = 0
-                end_index = visible_items
-            elif self.selected > total_items - (visible_items // 2) - 1:
-                end_index = total_items
-                start_index = total_items - visible_items
-            else:
-                start_index = self.selected - visible_items // 2
-                end_index = start_index + visible_items
-        for i in range(start_index, end_index):
-            entry = self.entries[i]
-            y_pos = MENU_START_Y + 35 + (i - start_index) * 20
-            is_dir = False
-            is_system = False
-            if entry == "..":
-                is_dir = True
-            else:
-                try:
-                    stat = os.stat(self.join(entry))
-                    is_dir = stat[0] & 0x4000
-                except:
-                    pass
-                is_system = self.is_system_file(self.join(entry))
-            if i == self.selected:
-                highlight_bitmap = displayio.Bitmap(SCREEN_WIDTH - 20, 18, 1)
-                highlight_palette = displayio.Palette(1)
-                highlight_palette[0] = 0x003366
-                highlight_sprite = displayio.TileGrid(
-                    highlight_bitmap, pixel_shader=highlight_palette,
-                    x=10, y=y_pos - 12
-                )
-                self.menu_group.append(highlight_sprite)
-                if is_system:
-                    text_color = 0xFF55FF  # Pink for system files
-                elif is_dir:
-                    text_color = 0x00AAFF  # Blue for directories
+            # Calculate visible files
+            list_start_y = MENU_START_Y + 45
+            max_visible = (SCREEN_HEIGHT - list_start_y - 30) // 12
+            start_idx = max(0, self.selected_index - max_visible // 2)
+            end_idx = min(len(self.files), start_idx + max_visible)
+            
+            if end_idx - start_idx < max_visible and len(self.files) > max_visible:
+                start_idx = max(0, end_idx - max_visible)
+            
+            for i in range(start_idx, end_idx):
+                file_info = self.files[i]
+                prefix = ">" if i == self.selected_index else " "
+                
+                # Color coding
+                if i == self.selected_index:
+                    color = 0x00FF00  # Green for selected
+                elif file_info["is_dir"]:
+                    color = 0x0080FF  # Blue for directories
+                elif file_info["name"].endswith(".py"):
+                    color = 0xFFFF00  # Yellow for Python files
                 else:
-                    text_color = 0xFFFF00  # Yellow for selected file
-            else:
-                if is_system:
-                    text_color = 0xFF55FF  # Pink for system files
-                elif is_dir:
-                    text_color = 0x00AAFF  # Blue for directories
+                    color = 0xFFFFFF  # White for other files
+                
+                # Format display text
+                if file_info["is_dir"]:
+                    display_text = f"{prefix} [{file_info['name']}]"
                 else:
-                    text_color = 0xFFFFFF  # White for files
-            icon = "/" if is_dir else ""
-            entry_label = label.Label(
-                terminalio.FONT, text=f"{i}: {entry}{icon}",
-                color=text_color, x=15, y=y_pos
-            )
-            self.menu_group.append(entry_label)
-        if start_index > 0:
-            up_arrow = label.Label(
-                terminalio.FONT, text="^ More above",
-                color=0x888888, x=SCREEN_WIDTH - 80, y=MENU_START_Y + 35
-            )
-            self.menu_group.append(up_arrow)
-        if end_index < total_items:
-            down_arrow = label.Label(
-                terminalio.FONT, text="v More below",
-                color=0x888888, x=SCREEN_WIDTH - 80, y=SCREEN_HEIGHT - 20
-            )
-            self.menu_group.append(down_arrow)
-        instructions = label.Label(
-            terminalio.FONT, text="Long: action  Short: next", color=0x00FF00, x=10, y=SCREEN_HEIGHT - 10
-        )
-        self.menu_group.append(instructions)
-
-    def join(self, entry):
-        if self.cwd.endswith("/"):
-            return self.cwd + entry
-        else:
-            return self.cwd + "/" + entry
-
-    def show_action_menu(self):
-        entry = self.entries[self.selected]
-        is_dir = False
-        if entry == "..":
-            actions = ["Open"]
-        else:
-            try:
-                stat = os.stat(self.join(entry))
-                is_dir = stat[0] & 0x4000
-            except:
-                pass
-            actions = ["Open"] if is_dir else ["Launch", "Copy", "Move", "Delete", "Rename"]
-        self.action_list = actions
-        self.action_selected = 0
-        self.mode = "action"
-        self.draw_action_menu()
-
-    def draw_action_menu(self):
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
-        entry = self.entries[self.selected]
-        title = label.Label(
-            terminalio.FONT, text=f"Action: {entry}", color=0x00FFFF,
-            x=10, y=MENU_START_Y + 8, scale=1
-        )
-        self.menu_group.append(title)
-        for i, action in enumerate(self.action_list):
-            y_pos = MENU_START_Y + 35 + i * 20
-            if i == self.action_selected:
-                highlight_bitmap = displayio.Bitmap(SCREEN_WIDTH - 20, 18, 1)
-                highlight_palette = displayio.Palette(1)
-                highlight_palette[0] = 0x003366
-                highlight_sprite = displayio.TileGrid(
-                    highlight_bitmap, pixel_shader=highlight_palette,
-                    x=10, y=y_pos - 12
+                    size_str = self._format_size(file_info["size"])
+                    name_len = 20 - len(size_str)
+                    name = file_info["name"][:name_len]
+                    display_text = f"{prefix} {name:<{name_len}} {size_str}"
+                
+                file_label = label.Label(
+                    terminalio.FONT,
+                    text=display_text,
+                    color=color,
+                    x=10,
+                    y=list_start_y + (i - start_idx) * 12
                 )
-                self.menu_group.append(highlight_sprite)
-                text_color = 0xFFFF00
-            else:
-                text_color = 0xFFFFFF
-            action_label = label.Label(
-                terminalio.FONT, text=action, color=text_color, x=15, y=y_pos
+                file_group.append(file_label)
+        
+        # Help text
+        help_text = "Short: Next  Long: Action  Hold: Exit"
+        help_label = label.Label(
+            terminalio.FONT,
+            text=help_text,
+            color=0x888888,
+            x=10,
+            y=SCREEN_HEIGHT - 15
+        )
+        file_group.append(help_label)
+        
+        # Position indicator
+        if self.files:
+            pos_text = f"{self.selected_index + 1}/{len(self.files)}"
+            pos_label = label.Label(
+                terminalio.FONT,
+                text=pos_text,
+                color=0x888888,
+                x=SCREEN_WIDTH - 50,
+                y=SCREEN_HEIGHT - 15
             )
-            self.menu_group.append(action_label)
-        instructions = label.Label(
-            terminalio.FONT, text="Long: select  Short: next", color=0x00FF00, x=10, y=SCREEN_HEIGHT - 10
-        )
-        self.menu_group.append(instructions)
-
-    def show_input(self, prompt):
-        self.input_buffer = ""
-        self.input_prompt = prompt
-        self.mode = "input"
-        self.draw_input()
-
-    def draw_input(self):
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
-        prompt_label = label.Label(
-            terminalio.FONT, text=self.input_prompt, color=0x00FFFF, x=10, y=MENU_START_Y + 8, scale=1
-        )
-        self.menu_group.append(prompt_label)
-        input_label = label.Label(
-            terminalio.FONT, text=self.input_buffer, color=0xFFFF00, x=15, y=MENU_START_Y + 40
-        )
-        self.menu_group.append(input_label)
-        instructions = label.Label(
-            terminalio.FONT, text="Long: confirm  Short: next char", color=0x00FF00, x=10, y=SCREEN_HEIGHT - 10
-        )
-        self.menu_group.append(instructions)
-
-    def show_warning(self, message, on_confirm, on_cancel=None):
-        self.mode = "warning"
-        self.warning_message = message
-        self.warning_on_confirm = on_confirm
-        self.warning_on_cancel = on_cancel
-        self.draw_warning()
-
-    def draw_warning(self):
-        while len(self.menu_group) > 0:
-            self.menu_group.pop()
-        warning_label = label.Label(
-            terminalio.FONT, text="WARNING!", color=0xFF0000, x=10, y=MENU_START_Y + 8, scale=2
-        )
-        self.menu_group.append(warning_label)
-        msg_label = label.Label(
-            terminalio.FONT, text=self.warning_message, color=0xFFFF00, x=10, y=MENU_START_Y + 40, scale=1
-        )
-        self.menu_group.append(msg_label)
-        instructions = label.Label(
-            terminalio.FONT, text="Long: confirm  Short: cancel", color=0x00FF00, x=10, y=SCREEN_HEIGHT - 10
-        )
-        self.menu_group.append(instructions)
-
-    def is_system_file(self, path):
-        # Consider .py, .toml, .json, and anything in /system/ as important
-        if path.startswith("/system/"):
-            return True
-        for ext in (".py", ".toml", ".json"):
-            if path.endswith(ext):
-                return True
-        return False
-
-    def main_loop(self):
-        self.draw_menu()
-        last_button = self.button.value if self.has_button else True
-        prev_selected = self.selected
-        start_time = time.monotonic()
-        timeout = 60
-        input_chars = "abcdefghijklmnopqrstuvwxyz0123456789._- /"
-        input_index = 0
-        button_hold_start = None
+            file_group.append(pos_label)
+        
+        self.main_group.append(file_group)
+        self.display.root_group = self.main_group
+    
+    def show_action_menu(self, selected_item):
+        """Show action menu for selected item with exit and back options"""
+        file_info = self.files[selected_item]
+        actions = []
+        
+        # Add file/directory specific actions
+        if file_info["is_dir"]:
+            if file_info["name"] != "..":
+                actions.extend(["Open", "Rename", "Delete", "Properties"])
+            else:
+                actions.extend(["Open"])
+        else:
+            actions.extend(["View", "Edit", "Rename", "Delete", "Properties"])
+            if file_info["name"].endswith(".py"):
+                actions.insert(0, "Run")  # Add Run at the beginning for Python files
+        
+        # Always add navigation options
+        actions.extend(["Back", "Exit"])
+        
+        action_selected = 0
+        
         while True:
-            now = time.monotonic()
-            if now - self.last_status_update > self.status_update_interval:
-                self.status_bar.set_status(f"{self.cwd}", 0x00FFFF)
-                self.last_status_update = now
-
-            # --- Exit to app_loader if button held for 10s (non-blocking) ---
-            if self.has_button:
-                if not self.button.value:
-                    if button_hold_start is None:
-                        button_hold_start = now
-                    elif now - button_hold_start > 10.0:
-                        self.status_bar.set_status("Exiting...", 0xFF0000)
-                        time.sleep(0.5)
-                        try:
-                            supervisor.set_next_code_file("/app_loader.py")
-                            supervisor.reload()
-                        except Exception as e:
-                            self.status_bar.set_status(f"Exit error: {e}", 0xFF0000)
-                            time.sleep(2)
-                        return
+            # Clear display and show action menu
+            while len(self.main_group) > 1:  # Keep status bar, remove everything else
+                self.main_group.pop()
+            
+            self.status_bar.set_status("Action Menu")
+            
+            # Create action menu group
+            action_group = displayio.Group()
+            
+            # Title
+            title_text = f"Actions: {file_info['name'][:15]}"
+            title = label.Label(
+                terminalio.FONT,
+                text=title_text,
+                color=0x00FFFF,
+                x=10,
+                y=MENU_START_Y + 10
+            )
+            action_group.append(title)
+            
+            # Action options
+            for i, action in enumerate(actions):
+                prefix = ">" if i == action_selected else " "
+                color = 0x00FF00 if i == action_selected else 0xFFFFFF
+                
+                action_label = label.Label(
+                    terminalio.FONT,
+                    text=f"{prefix} {action}",
+                    color=color,
+                    x=10,
+                    y=MENU_START_Y + 30 + i * 15
+                )
+                action_group.append(action_label)
+            
+            # Help text
+            help_label = label.Label(
+                terminalio.FONT,
+                text="Short: Next  Long: Select",
+                color=0x888888,
+                x=10,
+                y=SCREEN_HEIGHT - 20
+            )
+            action_group.append(help_label)
+            
+            self.main_group.append(action_group)
+            self.display.root_group = self.main_group
+            
+            # Handle button input
+            action = self._wait_for_button_action()
+            
+            if action == "long":  # Long press - select action
+                selected_action = actions[action_selected]
+                
+                if selected_action == "Back":
+                    return "back"
+                elif selected_action == "Exit":
+                    return "exit"
                 else:
-                    button_hold_start = None
-
-            # --- Navigation and modes ---
-            if self.mode == "browse":
-                if self.has_button:
-                    if not self.button.value and last_button:
-                        press_time = time.monotonic()
-                        while not self.button.value:
-                            if time.monotonic() - press_time > 1.0:
-                                self.show_action_menu()
-                                break
-                            time.sleep(0.01)
-                        else:
-                            self.selected = (self.selected + 1) % len(self.entries)
-                    last_button = self.button.value
-                if self.selected != prev_selected:
-                    self.draw_menu()
-                    prev_selected = self.selected
-            elif self.mode == "action":
-                if self.has_button:
-                    if not self.button.value and last_button:
-                        press_time = time.monotonic()
-                        while not self.button.value:
-                            if time.monotonic() - press_time > 1.0:
-                                self.handle_action()
-                                self.mode = "browse"
-                                self.refresh_entries()
-                                self.draw_menu()
-                                break
-                            time.sleep(0.01)
-                        else:
-                            self.action_selected = (self.action_selected + 1) % len(self.action_list)
-                            self.draw_action_menu()
-                    last_button = self.button.value
-            elif self.mode == "input":
-                if self.has_button:
-                    if not self.button.value and last_button:
-                        press_time = time.monotonic()
-                        while not self.button.value:
-                            if time.monotonic() - press_time > 1.0:
-                                self.handle_input()
-                                self.mode = "browse"
-                                self.refresh_entries()
-                                self.draw_menu()
-                                break
-                            time.sleep(0.01)
-                        else:
-                            # Next char
-                            input_index = (input_index + 1) % len(input_chars)
-                            self.input_buffer = self.input_buffer[:-1] + input_chars[input_index] if self.input_buffer else input_chars[input_index]
-                            self.draw_input()
-                    last_button = self.button.value
-            elif self.mode == "warning":
-                if self.has_button:
-                    if not self.button.value and last_button:
-                        press_time = time.monotonic()
-                        while not self.button.value:
-                            if time.monotonic() - press_time > 1.0:
-                                # Long press: confirm
-                                if self.warning_on_confirm:
-                                    self.warning_on_confirm()
-                                self.mode = "browse"
-                                self.refresh_entries()
-                                self.draw_menu()
-                                break
-                            time.sleep(0.01)
-                        else:
-                            # Short press: cancel
-                            if self.warning_on_cancel:
-                                self.warning_on_cancel()
-                            self.mode = "browse"
-                            self.draw_menu()
-                    last_button = self.button.value
-            if time.monotonic() - start_time > timeout:
-                self.status_bar.set_status("Timeout", 0xFF0000)
+                    return self._execute_action(selected_action, file_info)
+                    
+            elif action == "short":  # Short press - navigate
+                action_selected = (action_selected + 1) % len(actions)
+    
+    def _execute_action(self, action, file_info):
+        """Execute the selected action on the item"""
+        self.status_bar.set_status(f"{action}: {file_info['name'][:15]}", 0xFFFF00)
+        
+        try:
+            if action == "Open":
+                if file_info["is_dir"]:
+                    self.current_path = file_info["path"]
+                    self.files = self._scan_directory(self.current_path)
+                    self.selected_index = 0
+                    return "continue"
+                else:
+                    return self._view_file(file_info)
+                    
+            elif action == "View":
+                return self._view_file(file_info)
+                
+            elif action == "Edit":
+                self._show_message("Edit not implemented yet", 0xFF8000)
+                return "continue"
+                
+            elif action == "Run" and file_info["name"].endswith(".py"):
+                return self._run_python_file(file_info)
+                
+            elif action == "Rename":
+                self._show_message("Rename not implemented yet", 0xFF8000)
+                return "continue"
+                
+            elif action == "Delete":
+                return self._delete_item(file_info)
+                
+            elif action == "Properties":
+                return self._show_properties(file_info)
+                
+            else:
+                self.status_bar.set_status("Action not supported", 0xFF0000)
                 time.sleep(1)
-                break
-            time.sleep(0.02)
-
-    def handle_action(self):
-        entry = self.entries[self.selected]
-        path = self.join(entry)
-        action = self.action_list[self.action_selected]
-        def do_delete():
-            try:
-                os.remove(path)
-                self.status_bar.set_status("Deleted", 0xFF0000)
-            except Exception as e:
-                self.status_bar.set_status(f"Error: {e}", 0xFF0000)
-        def do_move():
-            self.show_input("Move to:")
-            self.input_buffer = entry
-            self.input_action = "move"
-        def do_rename():
-            self.show_input("Rename to:")
-            self.input_buffer = entry
-            self.input_action = "rename"
-        if action == "Open":
-            if entry == "..":
-                if self.cwd != "/":
-                    self.cwd = "/".join(self.cwd.rstrip("/").split("/")[:-1]) or "/"
-                    self.refresh_entries()
-            else:
-                try:
-                    stat = os.stat(path)
-                    if stat[0] & 0x4000:
-                        self.cwd = path
-                        self.refresh_entries()
-                except Exception as e:
-                    self.status_bar.set_status(f"Error: {e}", 0xFF0000)
-        elif action == "Launch":
-            if path.endswith(".py"):
-                self.status_bar.set_status(f"Launching {entry}", 0xFFFF00)
-                time.sleep(0.5)
-                supervisor.set_next_code_file(path)
+                return "continue"
+                
+        except Exception as e:
+            self.status_bar.set_status(f"Error: {str(e)[:20]}", 0xFF0000)
+            time.sleep(2)
+            return "continue"
+    
+    def _view_file(self, file_info):
+        """View file contents"""
+        try:
+            with open(file_info["path"], "r") as f:
+                content = f.read(500)  # Read first 500 characters
+            
+            self._show_message(f"File: {file_info['name']}\n\n{content}", 0x00FFFF)
+            self._wait_for_button_action()
+            return "continue"
+            
+        except Exception as e:
+            self._show_message(f"Error reading file:\n{str(e)}", 0xFF0000)
+            time.sleep(2)
+            return "continue"
+    
+    def _run_python_file(self, file_info):
+        """Run Python file"""
+        try:
+            if hasattr(supervisor, "set_next_code_file"):
+                supervisor.set_next_code_file(file_info["path"])
                 supervisor.reload()
-        elif action == "Copy":
-            self.show_input("Copy to:")
-            self.input_buffer = entry
-            self.input_action = "copy"
-        elif action == "Move":
-            if self.is_system_file(path):
-                self.show_warning(f"Move system file?\n{entry}", do_move)
             else:
-                do_move()
-        elif action == "Delete":
-            if self.is_system_file(path):
-                self.show_warning(f"Delete system file?\n{entry}", do_delete)
-            else:
-                do_delete()
-        elif action == "Rename":
-            if self.is_system_file(path):
-                self.show_warning(f"Rename system file?\n{entry}", do_rename)
-            else:
-                do_rename()
+                self._show_message("Cannot run Python files\non this system", 0xFF0000)
+                time.sleep(2)
+            return "continue"
+        except Exception as e:
+            self._show_message(f"Error running file:\n{str(e)}", 0xFF0000)
+            time.sleep(2)
+            return "continue"
+    
+    def _delete_item(self, file_info):
+        """Delete file or directory"""
+        # Show confirmation
+        self._show_message(f"Delete {file_info['name']}?\nLong press to confirm\nShort press to cancel", 0xFF8000)
+        
+        action = self._wait_for_button_action()
+        if action == "long":
+            try:
+                if file_info["is_dir"]:
+                    os.rmdir(file_info["path"])
+                else:
+                    os.remove(file_info["path"])
+                
+                self._show_message(f"Deleted {file_info['name']}", 0x00FF00)
+                time.sleep(1)
+                
+                # Refresh file list
+                self.files = self._scan_directory(self.current_path)
+                if self.selected_index >= len(self.files):
+                    self.selected_index = max(0, len(self.files) - 1)
+                
+                return "continue"
+                
+            except Exception as e:
+                self._show_message(f"Delete failed:\n{str(e)}", 0xFF0000)
+                time.sleep(2)
+                return "continue"
+        else:
+            return "continue"
+    
+    def _show_properties(self, file_info):
+        """Show file/directory properties"""
+        try:
+            stat_info = os.stat(file_info["path"])
+            
+            props = f"Properties: {file_info['name']}\n\n"
+            props += f"Path: {file_info['path']}\n"
+            props += f"Type: {'Directory' if file_info['is_dir'] else 'File'}\n"
+            
+            if not file_info["is_dir"]:
+                props += f"Size: {self._format_size(file_info['size'])} ({file_info['size']} bytes)\n"
+            
+            # Add basic file info
+            props += f"\nPress button to return"
+            
+            self._show_message(props, 0x00FFFF)
+            self._wait_for_button_action()
+            return "continue"
+            
+        except Exception as e:
+            self._show_message(f"Error getting properties:\n{str(e)}", 0xFF0000)
+            time.sleep(2)
+            return "continue"
+    
+    def _show_message(self, message, color=0xFFFFFF):
+        """Show a message on screen"""
+        # Clear main group but keep status bar
+        while len(self.main_group) > 1:
+            self.main_group.pop()
+        
+        message_group = displayio.Group()
+        lines = message.split("\n")
+        
+        for i, line in enumerate(lines):
+            if line.strip():  # Skip empty lines
+                text_label = label.Label(
+                    terminalio.FONT,
+                    text=line[:35],  # Limit line length
+                    color=color,
+                    x=10,
+                    y=MENU_START_Y + 20 + i * 15
+                )
+                message_group.append(text_label)
+        
+        self.main_group.append(message_group)
+        self.display.root_group = self.main_group
+    
+    def _wait_for_button_action(self):
+        """Wait for button action and return the type"""
+        if not self.has_button:
+            time.sleep(0.5)
+            return "short"  # Default action for no button
+        
+        # Wait for button press
+        while self.button.value:
+            time.sleep(0.01)
+        
+        # Button is now pressed, measure duration
+        press_start = time.monotonic()
+        
+        # Wait for release
+        while not self.button.value:
+            time.sleep(0.01)
+        
+        press_duration = time.monotonic() - press_start
+        
+        # Add delay to prevent bouncing
+        time.sleep(0.15)
+        
+        if press_duration > 2.0:
+            return "hold"  # Very long press
+        elif press_duration > 1.0:
+            return "long"  # Long press
+        elif press_duration > 0.05:
+            return "short"  # Short press
+        else:
+            return "none"
+    
+    def _handle_file_browser_input(self):
+        """Handle input in file browser mode"""
+        action = self._wait_for_button_action()
+        
+        if action == "hold":  # Very long press - exit
+            self.running = False
+            return
+            
+        elif action == "long":  # Long press - show action menu
+            if self.files:
+                result = self.show_action_menu(self.selected_index)
+                if result == "exit":
+                    self.running = False
+                # "back" and "continue" just return to file browser
+                
+        elif action == "short":  # Short press - navigate
+            if self.files:
+                self.selected_index = (self.selected_index + 1) % len(self.files)
+    
+    def run(self):
+        """Main file manager loop"""
+        # Initial directory scan
+        self.files = self._scan_directory(self.current_path)
+        
+        while self.running:
+            try:
+                self._draw_file_list()
+                self._handle_file_browser_input()
+                
+            except KeyboardInterrupt:
+                print("File Manager interrupted")
+                break
+            except Exception as e:
+                print(f"Error in file manager: {e}")
+                self.status_bar.set_status(f"Error: {str(e)[:20]}", 0xFF0000)
+                time.sleep(2)
+        
+        # Clean exit message
+        self._show_message("File Manager Exiting...", 0x00FF00)
+        time.sleep(1)
 
-    def handle_input(self):
-        entry = self.entries[self.selected]
-        path = self.join(entry)
-        if self.input_action == "copy":
-            dest = self.join(self.input_buffer)
-            try:
-                with open(path, "rb") as src, open(dest, "wb") as dst:
-                    dst.write(src.read())
-                self.status_bar.set_status("Copied", 0x00FF00)
-            except Exception as e:
-                self.status_bar.set_status(f"Error: {e}", 0xFF0000)
-        elif self.input_action == "move":
-            dest = self.join(self.input_buffer)
-            try:
-                os.rename(path, dest)
-                self.status_bar.set_status("Moved", 0x00FF00)
-            except Exception as e:
-                self.status_bar.set_status(f"Error: {e}", 0xFF0000)
-        elif self.input_action == "rename":
-            dest = self.join(self.input_buffer)
-            try:
-                os.rename(path, dest)
-                self.status_bar.set_status("Renamed", 0x00FF00)
-            except Exception as e:
-                self.status_bar.set_status(f"Error: {e}", 0xFF0000)
+def main():
+    """Main entry point"""
+    try:
+        print("Starting File Manager...")
+        fm = FileManager()
+        fm.run()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        # Try to show error on display if possible
+        try:
+            display = board.DISPLAY
+            group = displayio.Group()
+            error_label = label.Label(
+                terminalio.FONT,
+                text=f"Fatal Error:\n{str(e)[:50]}",
+                color=0xFF0000,
+                x=10,
+                y=30
+            )
+            group.append(error_label)
+            display.root_group = group
+        except Exception:
+            pass
+        
+        # Keep system alive for debugging
+        while True:
+            time.sleep(1)
 
 if __name__ == "__main__":
-    fm = FileManager()
-    fm.main_loop()
+    main()
+
+
