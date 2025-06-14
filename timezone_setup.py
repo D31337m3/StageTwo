@@ -16,37 +16,43 @@ TIMEZONES = [
     "Australia/Sydney"
 ]
 
-def save_settings(timezone, dst, hour, minute):
+import os
+
+def save_settings(SETTINGS_PATH, timezone, dst, hour, minute):
+    # Read existing lines if file exists
     lines = []
-    found_tz = found_dst = found_hr = found_min = False
-    if os.path.exists(SETTINGS_PATH):
+    keys_found = {"TIMEZONE": False, "DST": False, "MANUAL_HOUR": False, "MANUAL_MINUTE": False}
+    if SETTINGS_PATH in os.listdir("/"):
         with open(SETTINGS_PATH, "r") as f:
             for line in f:
                 if line.startswith("TIMEZONE"):
                     lines.append(f'TIMEZONE = "{timezone}"\n')
-                    found_tz = True
+                    keys_found["TIMEZONE"] = True
                 elif line.startswith("DST"):
                     lines.append(f'DST = {dst}\n')
-                    found_dst = True
+                    keys_found["DST"] = True
                 elif line.startswith("MANUAL_HOUR"):
                     lines.append(f'MANUAL_HOUR = {hour}\n')
-                    found_hr = True
+                    keys_found["MANUAL_HOUR"] = True
                 elif line.startswith("MANUAL_MINUTE"):
                     lines.append(f'MANUAL_MINUTE = {minute}\n')
-                    found_min = True
+                    keys_found["MANUAL_MINUTE"] = True
                 else:
                     lines.append(line)
-    if not found_tz:
+    # If any keys were not found, append them
+    if not keys_found["TIMEZONE"]:
         lines.append(f'TIMEZONE = "{timezone}"\n')
-    if not found_dst:
+    if not keys_found["DST"]:
         lines.append(f'DST = {dst}\n')
-    if not found_hr:
+    if not keys_found["MANUAL_HOUR"]:
         lines.append(f'MANUAL_HOUR = {hour}\n')
-    if not found_min:
+    if not keys_found["MANUAL_MINUTE"]:
         lines.append(f'MANUAL_MINUTE = {minute}\n')
+
+    # Write all lines back to the file
     with open(SETTINGS_PATH, "w") as f:
-        f.writelines(lines)
-    print("Timezone settings saved.")
+        for line in lines:
+            f.write(line)
 
 def select_from_list(options, prompt="Select:", display=None, button=None):
     idx = 0
@@ -281,8 +287,7 @@ def main():
         except Exception as e:
             print("Manual RTC set failed:", e)
     # Save settings
-    save_settings(timezone, dst, hour if not do_ntp else 0, minute if not do_ntp else 0)
-
+        save_settings(SETTINGS_PATH, timezone, dst, hour if not do_ntp else 0, minute if not do_ntp else 0)
     if display:
         group = displayio.Group()
         display.root_group = group
