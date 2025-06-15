@@ -107,12 +107,12 @@ def read_settings():
         "BOOT_TIMEOUT": DEFAULT_TIMEOUT,
         "DEVELOPER_MODE": False,
         "FLASH_WRITE": False,
-        "DISPLAY_BRIGHTNESS": DEFAULT_BRIGHTNESS,
+        "DISPLAY_BRIGHTNESS": 0.5,
         "SD_CARD_ENABLED": True,
         "WIFI_ENABLED": True,
         "NTP_ENABLED": True,
         "SCREENSAVER_ENABLED": True,
-        "SCREENSAVER_TIMEOUT": 300,
+        "SCREENSAVER_TIMEOUT": 60,
         "SCREENSAVER_TYPE": "trippy"
     }
     
@@ -737,10 +737,12 @@ def main():
         
         # Show splash screen
         show_splash()
+        set_time_if_wifi()
         
         # Analyze reset cause
         reset_type, reset_description = analyze_reset_cause()
         show_boot_status(f"Boot Analysis\n\n{reset_description}\nInitializing...", 0x00FFFF)
+        prepare_sdcard()
         
         # Check for first boot
         is_first_boot = check_first_boot()

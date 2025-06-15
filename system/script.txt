@@ -1,0 +1,39 @@
+
+BOOTING ...
+*WAIT:3*
+*CLEAR*
+$>telnet 127.0.0.4 
+*WAIT:1*
+> ACCESS to critcal files
+>   GRANTED 
+*WAIT:1*
+*CLEAR*
+Welcome to the Matrix Neo
+*WAIT:1*
+*CLEAR*
+We have been waiting a very 
+long time for you. Dont
+know what took you so long,
+but were sure glad your
+here.
+*CLEAR*
+Come with me...
+*WAIT:1*
+*CLEAR*
+WARNING !! System Failure
+WARNING !! System Failure
+*CLEAR*
+
+
+SYSTEM TAMPER ALERT
+*CLEAR*
+Welcome 
+ To 
+   STAGETWO 
+   
+   
+   
+*END*
+  
+
+

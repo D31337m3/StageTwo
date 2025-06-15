@@ -289,7 +289,7 @@ class RecoverySystem:
             self.show_progress("Downloading web recovery...")
             pool = socketpool.SocketPool(wifi.radio)
             requests = adafruit_requests.Session(pool)
-            url = "https://raw.githubusercontent.com/d31337m3/stagetwo/main/webrecovery.py"
+            url = "https://raw.githubusercontent.com/d31337m3/stagetwo/main/web_recovery.py"
             response = requests.get(url)
             if response.status_code == 200:
                 with open("/webrecovery.py", "w") as f:
