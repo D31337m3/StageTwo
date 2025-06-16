@@ -1,0 +1,9 @@
+body { font-family: sans-serif; margin: 0; background: #222; color: #eee; }
+header { background: #333; padding: 1em; }
+nav a { color: #fff; margin-right: 1em; text-decoration: none; }
+main { padding: 1em; }
+canvas { border: 1px solid #444; background: #000; }
+@media (max-width: 600px) {
+  main, header { padding: 0.5em; }
+  canvas { width: 100% !important; height: auto !important; }
+}
