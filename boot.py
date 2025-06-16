@@ -1,9 +1,13 @@
 """
-StageTwo Boot System
+-------------------------------------------------------------------------
+StageTwo Boot System v1.0 - Part of CPy_StageTwo
+--based off of the CircuitPython Project
+-------------------------------------------------------------------------
 Advanced boot loader with recovery, developer mode, and system management
 Compatible with CircuitPython runtimes
 
-(C) 2025 StageTwo Team
+(C) 2025 StageTwo Team/D.Ranger - I am the TEAM
+-------------------------------------------------------------------------
 """
 
 import microcontroller
@@ -47,8 +51,8 @@ except ImportError:
     print("Image loading not available")
 
 # Version info
-__version__ = "2.1"
-__author__ = "StageTwo Team"
+__version__ = "1.0"
+__author__ = "StageTwo Team / D.Ranger  - I am the TEAM"
 
 # NVM flag positions
 RECOVERY_FLAG_ADDR = 0
@@ -555,13 +559,15 @@ def show_boot_status(message, color=0xFFFFFF):
 
 # --- Boot Loop Detection ---
 def check_boot_loop():
-    """Enhanced boot loop detection with recovery"""
+    """Enhanced boot loop detection with recovery"""                # BOOT LOOP DETECTION CODE DISABLED TEMPORARILY #########
+                                                                    # REENABLE BEFORE DEPLOYING #########
     try:
         reload_count = read_nvm_byte(RELOAD_COUNTER_ADDR)
         threshold = read_nvm_byte(BOOT_LOOP_THRESHOLD_ADDR)
         
         if threshold == 0:
             threshold = DEFAULT_BOOT_LOOP_THRESHOLD
+            '''
             write_nvm_byte(BOOT_LOOP_THRESHOLD_ADDR, threshold)
         
         # Increment reload counter
@@ -580,7 +586,7 @@ def check_boot_loop():
             
             time.sleep(3)
             return True
-        
+            '''
         return False
         
     except Exception as e:
@@ -1192,4 +1198,6 @@ print(f"💾 Final boot memory: {gc.mem_free()} bytes free")
 print("🚀 System initialization complete")
 
 # End of boot.py
+
+
 
